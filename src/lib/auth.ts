@@ -3,6 +3,7 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { db } from "@/lib/db";
 import { resolvePermissions } from "@/lib/permissions";
+import { rateLimit, resetLimit } from "@/lib/auth-security";
 
 export const SESSION_MAX_AGE = 60 * 60 * 8; // 8 hours
 
@@ -42,6 +43,14 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) return null;
         const email = credentials.email.toLowerCase().trim();
+
+        // Brute-force protection: 8 failures per account per 15 minutes.
+        // Keyed on the email only — deliberately not on IP, so a shared office
+        // NAT cannot be used to lock everyone out, and a distributed attack
+        // against one account still hits the limit.
+        const limit = rateLimit(`login:${email}`, 8, 15 * 60 * 1000);
+        if (!limit.allowed) return null;
+
         const user = await db.user.findUnique({
           where: { email },
           include: { roles: true },
@@ -49,6 +58,9 @@ export const authOptions: NextAuthOptions = {
         if (!user || !user.isActive) return null;
         const valid = await compare(credentials.password, user.passwordHash);
         if (!valid) return null;
+
+        // Correct credentials — clear the failure counter.
+        resetLimit(`login:${email}`);
 
         await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
         await db.auditLog.create({

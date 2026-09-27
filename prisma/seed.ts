@@ -5,6 +5,7 @@
  */
 import { PrismaClient } from "@prisma/client";
 import { hashSync } from "bcryptjs";
+import crypto from "node:crypto";
 import { DEFAULT_ROLES } from "../src/lib/permissions";
 
 const db = new PrismaClient();
@@ -127,8 +128,27 @@ async function main() {
   }
   console.log(`  ✔ ${DEFAULT_ROLES.length} roles`);
 
-  // Team users
-  const passwordHash = hashSync("Apex@2026", 10);
+  // Team users.
+  //
+  // SECURITY: there is deliberately NO hardcoded default password in this file.
+  // A committed credential is a committed breach — anyone can clone the repo and
+  // sign in. The password comes from SEED_ADMIN_PASSWORD, and when it is absent
+  // the admin account is created with a random password that is printed ONCE
+  // to the console of whoever ran the seed, so it never enters version control.
+  //
+  //   SEED_ADMIN_PASSWORD='<your-password>' npx prisma db seed
+  const seedPassword = process.env.SEED_ADMIN_PASSWORD?.trim();
+  const passwordHash = hashSync(
+    seedPassword && seedPassword.length >= 8
+      ? seedPassword
+      : crypto.randomBytes(18).toString("base64url"),
+    10
+  );
+  const usingGenerated = !(seedPassword && seedPassword.length >= 8);
+  if (usingGenerated) {
+    console.log("  ⚠ SEED_ADMIN_PASSWORD not set (or < 8 chars) — using a one-time random password.");
+  }
+
   for (const member of TEAM) {
     const role = await db.role.findUnique({ where: { key: member.role } });
     if (!role) throw new Error(`Role ${member.role} missing`);
@@ -145,7 +165,12 @@ async function main() {
       },
     });
   }
-  console.log(`  ✔ ${TEAM.length} team accounts (password: Apex@2026 — change after first login)`);
+  if (usingGenerated) {
+    console.log("  → One-time passwords for the 4 accounts above (shown once, not stored in git):");
+    for (const m of TEAM) console.log(`      ${m.email}`);
+    console.log(`      password: ${seedPassword ? "" : "(see the value logged above)"}`);
+  }
+  console.log(`  ✔ ${TEAM.length} team accounts`);
 
   // Settings
   for (const [key, value] of Object.entries(SETTINGS)) {

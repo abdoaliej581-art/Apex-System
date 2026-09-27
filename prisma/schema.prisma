@@ -46,8 +46,25 @@ model User {
   reviewedContent   Content[]  @relation("ContentReviewer")
   knowledgeArticles KnowledgeArticle[] @relation("KnowledgeAuthor")
   portalClient      Client?    @relation("ClientPortalUsers", fields: [clientId], references: [id], onDelete: SetNull)
+  passwordResetTokens PasswordResetToken[]
 
   @@index([clientId])
+}
+
+// Password recovery. The raw token is NEVER stored — only a SHA-256 hash — so a
+// database leak cannot be replayed. Single use, short expiry.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Role {
