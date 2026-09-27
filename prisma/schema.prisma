@@ -16,7 +16,8 @@ model User {
   id                String    @id @default(cuid())
   email             String    @unique
   name              String
-  passwordHash      String
+  passwordHash      String    @default("") // kept for backward-compat; auth now via Supabase
+  supabaseId        String?   @unique       // Supabase auth.users UUID
   title             String? // job title e.g. "Frontend Developer"
   avatarColor       String    @default("#22d3ee")
   customPermissions String? // JSON array of extra permission strings

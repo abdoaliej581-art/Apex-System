@@ -113,6 +113,7 @@ const TEAM = [
   { email: "sales@apex.system", name: "APEX Sales", title: "Sales Specialist", role: "SALES", color: "#34d399" },
   { email: "pm@apex.system", name: "APEX PM", title: "Project Manager", role: "PROJECT_MANAGER", color: "#f59e0b" },
   { email: "dev@apex.system", name: "APEX Developer", title: "Full-Stack Developer", role: "DEVELOPER", color: "#f472b6" },
+  { email: "mona.hassan@niledigital.eg", name: "Mona Hassan", title: "Client", role: "CLIENT", color: "#a78bfa" },
 ];
 
 async function main() {
@@ -154,14 +155,17 @@ async function main() {
     if (!role) throw new Error(`Role ${member.role} missing`);
     const existing = await db.user.findUnique({ where: { email: member.email }, include: { roles: { select: { key: true } } } });
     if (existing) {
-      // Ensure the user has the correct role even if it changed or was disconnected
+      // Ensure the user has the correct role even if it changed or was disconnected.
+      // Also update the passwordHash so re-seeding with SEED_ADMIN_PASSWORD always
+      // resets the password to the configured value (fixes "random password on first run").
       const hasRole = existing.roles.some((r) => r.key === member.role);
-      if (!hasRole) {
-        await db.user.update({
-          where: { email: member.email },
-          data: { roles: { connect: { id: role.id } } },
-        });
-      }
+      await db.user.update({
+        where: { email: member.email },
+        data: {
+          passwordHash,
+          ...(hasRole ? {} : { roles: { connect: { id: role.id } } }),
+        },
+      });
     } else {
       await db.user.create({
         data: {

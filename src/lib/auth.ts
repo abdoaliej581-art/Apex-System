@@ -1,18 +1,11 @@
 import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
-import { compare } from "bcryptjs";
 import { db } from "@/lib/db";
 import { resolvePermissions } from "@/lib/permissions";
-import { rateLimit, resetLimit } from "@/lib/auth-security";
+import { supabaseAnon } from "@/lib/supabase";
 
 export const SESSION_MAX_AGE = 60 * 60 * 8; // 8 hours
 
-/**
- * Security: NEXTAUTH_SECRET signs the session JWT. A hardcoded fallback would let
- * anyone forge a session cookie, so refuse to boot without one in production.
- * In development we generate an ephemeral secret so `next dev` works out of the box —
- * it changes on restart, which simply invalidates old dev sessions.
- */
 function resolveSecret(): string {
   const secret = process.env.NEXTAUTH_SECRET?.trim();
   if (secret && secret.length >= 32) return secret;
@@ -23,7 +16,7 @@ function resolveSecret(): string {
   }
   if (process.env.NODE_ENV === "production") {
     throw new Error(
-      "NEXTAUTH_SECRET is required in production. Set it in your environment (Vercel → Settings → Environment Variables) or generate one with: openssl rand -base64 32"
+      "NEXTAUTH_SECRET is required in production. Set it in Vercel → Settings → Environment Variables."
     );
   }
   return crypto.randomUUID() + crypto.randomUUID();
@@ -44,24 +37,38 @@ export const authOptions: NextAuthOptions = {
         if (!credentials?.email || !credentials?.password) return null;
         const email = credentials.email.toLowerCase().trim();
 
-        // Brute-force protection: 8 failures per account per 15 minutes.
-        // Keyed on the email only — deliberately not on IP, so a shared office
-        // NAT cannot be used to lock everyone out, and a distributed attack
-        // against one account still hits the limit.
-        const limit = rateLimit(`login:${email}`, 8, 15 * 60 * 1000);
-        if (!limit.allowed) return null;
+        // ── Step 1: Verify credentials with Supabase Auth ──────────────────────
+        // signInWithPassword validates against Supabase's auth.users table.
+        // We use the anon client with persistSession:false — no cookies are set,
+        // we only care about the success/failure result.
+        const { data: authData, error: authError } = await supabaseAnon.auth.signInWithPassword({
+          email,
+          password: credentials.password,
+        });
 
+        if (authError || !authData?.user) {
+          // Wrong credentials or unconfirmed account
+          return null;
+        }
+
+        // ── Step 2: Load the APEX User record from our DB ─────────────────────
+        // The Supabase auth user is linked by email (and optionally supabaseId).
         const user = await db.user.findUnique({
           where: { email },
           include: { roles: true },
         });
+
         if (!user || !user.isActive) return null;
-        const valid = await compare(credentials.password, user.passwordHash);
-        if (!valid) return null;
 
-        // Correct credentials — clear the failure counter.
-        resetLimit(`login:${email}`);
+        // Sync supabaseId on first login if not yet stored
+        if (!user.supabaseId && authData.user.id) {
+          await db.user.update({
+            where: { id: user.id },
+            data: { supabaseId: authData.user.id },
+          }).catch(() => undefined); // non-fatal
+        }
 
+        // ── Step 3: Update lastLoginAt + audit ───────────────────────────────
         await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
         await db.auditLog.create({
           data: {
@@ -70,10 +77,11 @@ export const authOptions: NextAuthOptions = {
             action: "LOGIN",
             entityType: "USER",
             entityId: user.id,
-            metadata: JSON.stringify({ email }),
+            metadata: JSON.stringify({ email, provider: "supabase" }),
           },
-        });
+        }).catch(() => undefined);
 
+        // ── Step 4: Resolve permissions and return NextAuth user object ────────
         const permissions = resolvePermissions(
           user.roles.map((r) => ({ permissions: r.permissions })),
           user.customPermissions
@@ -104,7 +112,6 @@ export const authOptions: NextAuthOptions = {
         token.clientId = (user as unknown as { clientId?: string | null }).clientId ?? null;
       }
       if (trigger === "update") {
-        // refresh permissions on session update
         const dbUser = await db.user.findUnique({
           where: { id: token.id as string },
           include: { roles: true },
