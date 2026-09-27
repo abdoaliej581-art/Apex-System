@@ -6,9 +6,31 @@ import { resolvePermissions } from "@/lib/permissions";
 
 export const SESSION_MAX_AGE = 60 * 60 * 8; // 8 hours
 
+/**
+ * Security: NEXTAUTH_SECRET signs the session JWT. A hardcoded fallback would let
+ * anyone forge a session cookie, so refuse to boot without one in production.
+ * In development we generate an ephemeral secret so `next dev` works out of the box —
+ * it changes on restart, which simply invalidates old dev sessions.
+ */
+function resolveSecret(): string {
+  const secret = process.env.NEXTAUTH_SECRET?.trim();
+  if (secret && secret.length >= 32) return secret;
+  if (secret && secret.length > 0 && secret.length < 32) {
+    throw new Error(
+      `NEXTAUTH_SECRET is too short (${secret.length} chars). Generate one with: openssl rand -base64 32`
+    );
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "NEXTAUTH_SECRET is required in production. Set it in your environment (Vercel → Settings → Environment Variables) or generate one with: openssl rand -base64 32"
+    );
+  }
+  return crypto.randomUUID() + crypto.randomUUID();
+}
+
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: SESSION_MAX_AGE },
-  secret: process.env.NEXTAUTH_SECRET || "apex-system-internal-secret-change-in-production",
+  secret: resolveSecret(),
   pages: { signIn: "/" },
   providers: [
     CredentialsProvider({
