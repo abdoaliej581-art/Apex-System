@@ -116,10 +116,6 @@
   --sidebar-ring: rgba(34, 211, 238, 0.45);
 }
 
-  --sidebar-border: rgba(122, 152, 199, 0.12);
-  --sidebar-ring: rgba(34, 211, 238, 0.45);
-}
-
 /* ── Light mode (opt-in via next-themes) ── */
 .light {
   color-scheme: light;
