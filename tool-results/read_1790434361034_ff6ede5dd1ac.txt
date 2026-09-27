@@ -1,0 +1,549 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     4→     4→import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, Field } from "@/components/shared";
+     5→     5→import { api, qs, formatDate } from "@/lib/api-client";
+     6→     6→import { useSession } from "next-auth/react";
+     7→     7→import { useToast } from "@/hooks/use-toast";
+     8→     8→import { Button } from "@/components/ui/button";
+     9→     9→import { Input } from "@/components/ui/input";
+    10→    10→import { Textarea } from "@/components/ui/textarea";
+    11→    11→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+    12→    12→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    13→    13→import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+    14→    14→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+    15→    15→import { CalendarPlus, CalendarDays, MapPin, ExternalLink, MoreHorizontal, Pencil, Trash2, Clock, StickyNote, ChevronRight } from "lucide-react";
+    16→    16→import { cn } from "@/lib/utils";
+    17→    17→
+    18→    18→type MeetingRow = {
+    19→    19→  id: string; title: string; date: string; startTime: string; endTime: string;
+    20→    20→  location?: string | null; meetingLink?: string | null; notes?: string | null;
+    21→    21→  outcome?: string | null; nextAction?: string | null; status: string;
+    22→    22→  lead?: { id: string; companyName: string } | null;
+    23→    23→  client?: { id: string; companyName: string } | null;
+    24→    24→  project?: { id: string; name: string } | null;
+    25→    25→};
+    26→    26→
+    27→    27→type Option = { id: string; label: string };
+    28→    28→
+    29→    29→/** Robustly extract a list from any list-route payload ({ items } | array | { leads }...) */
+    30→    30→function extractList(data: unknown): Record<string, unknown>[] {
+    31→    31→  if (Array.isArray(data)) return data as Record<string, unknown>[];
+    32→    32→  if (data && typeof data === "object") {
+    33→    33→    const obj = data as Record<string, unknown>;
+    34→    34→    for (const key of ["items", "leads", "clients", "projects", "team"]) {
+    35→    35→      if (Array.isArray(obj[key])) return obj[key] as Record<string, unknown>[];
+    36→    36→    }
+    37→    37→  }
+    38→    38→  return [];
+    39→    39→}
+    40→    40→
+    41→    41→function toOptions(url: string, labelKey: string): Promise<Option[]> {
+    42→    42→  return api
+    43→    43→    .get<unknown>(url)
+    44→    44→    .then((data) =>
+    45→    45→      extractList(data)
+    46→    46→        .map((x) => ({ id: String(x.id), label: String(x[labelKey] ?? x.name ?? x.companyName ?? "") }))
+    47→    47→        .filter((o) => o.label)
+    48→    48→    )
+    49→    49→    .catch(() => []); // 403 / unavailable → degrade gracefully to free text
+    50→    50→}
+    51→    51→
+    52→    52→function toDateInput(d: string | Date): string {
+    53→    53→  const x = new Date(d);
+    54→    54→  const p = (n: number) => String(n).padStart(2, "0");
+    55→    55→  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+    56→    56→}
+    57→    57→
+    58→    58→export function MeetingsView({ navigate }: { navigate: (p: string) => void }) {
+    59→    59→  const { toast } = useToast();
+    60→    60→  const { data: session } = useSession();
+    61→    61→  const perms = session?.user?.permissions || [];
+    62→    62→  const canCreate = perms.includes("meetings.create");
+    63→    63→  const canEdit = perms.includes("meetings.edit");
+    64→    64→  const canDelete = perms.includes("meetings.delete");
+    65→    65→
+    66→    66→  const [items, setItems] = useState<MeetingRow[]>([]);
+    67→    67→  const [total, setTotal] = useState(0);
+    68→    68→  const [page, setPage] = useState(1);
+    69→    69→  const [pageSize] = useState(50);
+    70→    70→  const [loading, setLoading] = useState(true);
+    71→    71→  const [error, setError] = useState(false);
+    72→    72→
+    73→    73→  const [search, setSearch] = useState("");
+    74→    74→  const [statusFilter, setStatusFilter] = useState("ALL");
+    75→    75→
+    76→    76→  // Link options (degrade to free text if not fetchable)
+    77→    77→  const [leadOpts, setLeadOpts] = useState<Option[]>([]);
+    78→    78→  const [clientOpts, setClientOpts] = useState<Option[]>([]);
+    79→    79→  const [projectOpts, setProjectOpts] = useState<Option[]>([]);
+    80→    80→  const [optsTried, setOptsTried] = useState(false);
+    81→    81→
+    82→    82→  // Dialog state
+    83→    83→  const [dialogOpen, setDialogOpen] = useState(false);
+    84→    84→  const [editing, setEditing] = useState<MeetingRow | null>(null);
+    85→    85→  const [saving, setSaving] = useState(false);
+    86→    86→  const [form, setForm] = useState({
+    87→    87→    title: "", date: "", startTime: "", endTime: "", location: "", meetingLink: "",
+    88→    88→    leadId: "", clientId: "", projectId: "", notes: "", relatedName: "",
+    89→    89→  });
+    90→    90→  // Complete dialog (capture outcome)
+    91→    91→  const [completing, setCompleting] = useState<MeetingRow | null>(null);
+    92→    92→  const [outcome, setOutcome] = useState("");
+    93→    93→  const [nextAction, setNextAction] = useState("");
+    94→    94→  const [deleting, setDeleting] = useState<MeetingRow | null>(null);
+    95→    95→
+    96→    96→  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+    97→    97→  const [query, setQuery] = useState("");
+    98→    98→
+    99→    99→  const load = useCallback(async (opts?: { page?: number; status?: string; q?: string }) => {
+   100→   100→    const p = opts?.page ?? page;
+   101→   101→    const st = opts?.status ?? statusFilter;
+   102→   102→    const q = opts?.q ?? query;
+   103→   103→    setLoading(true);
+   104→   104→    setError(false);
+   105→   105→    try {
+   106→   106→      const data = await api.get<{ items: MeetingRow[]; total: number }>(
+   107→   107→        `/api/meetings${qs({ page: p, pageSize, status: st === "ALL" ? undefined : st, q: q || undefined })}`
+   108→   108→      );
+   109→   109→      setItems(data.items);
+   110→   110→      setTotal(data.total);
+   111→   111→      setPage(p);
+   112→   112→    } catch (e) {
+   113→   113→      setError(true);
+   114→   114→      toast({ title: "Could not load meetings", description: e instanceof Error ? e.message : undefined });
+   115→   115→    } finally {
+   116→   116→      setLoading(false);
+   117→   117→    }
+   118→   118→  }, [page, statusFilter, query, pageSize, toast]);
+   119→   119→
+   120→   120→  useEffect(() => {
+   121→   121→    load({ page: 1, status: statusFilter, q: query });
+   122→   122→  }, [statusFilter, query]);
+   123→   123→
+   124→   124→  useEffect(() => {
+   125→   125→    Promise.all([
+   126→   126→      toOptions("/api/leads?pageSize=100", "companyName"),
+   127→   127→      toOptions("/api/clients?pageSize=100", "companyName"),
+   128→   128→      toOptions("/api/projects?pageSize=100", "name"),
+   129→   129→    ]).then(([l, c, p]) => {
+   130→   130→      setLeadOpts(l);
+   131→   131→      setClientOpts(c);
+   132→   132→      setProjectOpts(p);
+   133→   133→      setOptsTried(true);
+   134→   134→    });
+   135→   135→  }, []);
+   136→   136→
+   137→   137→  const onSearchInput = (v: string) => {
+   138→   138→    setSearch(v);
+   139→   139→    if (debounce.current) clearTimeout(debounce.current);
+   140→   140→    debounce.current = setTimeout(() => setQuery(v), 300);
+   141→   141→  };
+   142→   142→
+   143→   143→  // ---- Grouping: Today / Upcoming / Past
+   144→   144→  const groups = useMemo(() => {
+   145→   145→    const start = new Date(); start.setHours(0, 0, 0, 0);
+   146→   146→    const end = new Date(); end.setHours(23, 59, 59, 999);
+   147→   147→    const today: MeetingRow[] = [];
+   148→   148→    const upcoming: MeetingRow[] = [];
+   149→   149→    const past: MeetingRow[] = [];
+   150→   150→    items.forEach((m) => {
+   151→   151→      const d = new Date(m.date);
+   152→   152→      if (d >= start && d <= end) today.push(m);
+   153→   153→      else if (d > end) upcoming.push(m);
+   154→   154→      else past.push(m);
+   155→   155→    });
+   156→   156→    past.reverse(); // most recent past first
+   157→   157→    return [
+   158→   158→      { key: "TODAY", label: "Today", rows: today },
+   159→   159→      { key: "UPCOMING", label: "Upcoming", rows: upcoming },
+   160→   160→      { key: "PAST", label: "Past", rows: past },
+   161→   161→    ].filter((g) => g.rows.length > 0);
+   162→   162→  }, [items]);
+   163→   163→
+   164→   164→  const openCreate = () => {
+   165→   165→    setEditing(null);
+   166→   166→    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+   167→   167→    setForm({
+   168→   168→      title: "", date: toDateInput(tomorrow), startTime: "10:00", endTime: "11:00",
+   169→   169→      location: "", meetingLink: "", leadId: "", clientId: "", projectId: "", notes: "", relatedName: "",
+   170→   170→    });
+   171→   171→    setDialogOpen(true);
+   172→   172→  };
+   173→   173→
+   174→   174→  const openEdit = (m: MeetingRow) => {
+   175→   175→    setEditing(m);
+   176→   176→    setForm({
+   177→   177→      title: m.title, date: toDateInput(m.date), startTime: m.startTime, endTime: m.endTime,
+   178→   178→      location: m.location ?? "", meetingLink: m.meetingLink ?? "",
+   179→   179→      leadId: m.lead?.id ?? "", clientId: m.client?.id ?? "", projectId: m.project?.id ?? "",
+   180→   180→      notes: m.notes ?? "", relatedName: "",
+   181→   181→    });
+   182→   182→    setDialogOpen(true);
+   183→   183→  };
+   184→   184→
+   185→   185→  const submit = async () => {
+   186→   186→    if (!form.title.trim()) return toast({ title: "Title is required" });
+   187→   187→    if (!form.date || !form.startTime || !form.endTime) return toast({ title: "Date and times are required" });
+   188→   188→    setSaving(true);
+   189→   189→    try {
+   190→   190→      const notes = form.relatedName.trim() && !form.leadId && !form.clientId
+   191→   191→        ? `Related to: ${form.relatedName.trim()}${form.notes ? `\n${form.notes}` : ""}`
+   192→   192→        : form.notes;
+   193→   193→      const payload = {
+   194→   194→        title: form.title.trim(), date: form.date, startTime: form.startTime, endTime: form.endTime,
+   195→   195→        location: form.location || null, meetingLink: form.meetingLink || null, notes: notes || null,
+   196→   196→        leadId: form.leadId || null, clientId: form.clientId || null, projectId: form.projectId || null,
+   197→   197→      };
+   198→   198→      if (editing) {
+   199→   199→        await api.patch(`/api/meetings/${editing.id}`, payload);
+   200→   200→        toast({ title: "Meeting updated" });
+   201→   201→      } else {
+   202→   202→        await api.post("/api/meetings", payload);
+   203→   203→        toast({ title: "Meeting scheduled" });
+   204→   204→      }
+   205→   205→      setDialogOpen(false);
+   206→   206→      load();
+   207→   207→    } catch (e) {
+   208→   208→      toast({ title: "Save failed", description: e instanceof Error ? e.message : undefined });
+   209→   209→    } finally {
+   210→   210→      setSaving(false);
+   211→   211→    }
+   212→   212→  };
+   213→   213→
+   214→   214→  const changeStatus = async (m: MeetingRow, status: string) => {
+   215→   215→    try {
+   216→   216→      await api.patch(`/api/meetings/${m.id}`, { status });
+   217→   217→      toast({ title: `Meeting ${status.toLowerCase()}` });
+   218→   218→      load();
+   219→   219→    } catch (e) {
+   220→   220→      toast({ title: "Status change failed", description: e instanceof Error ? e.message : undefined });
+   221→   221→    }
+   222→   222→  };
+   223→   223→
+   224→   224→  const submitComplete = async () => {
+   225→   225→    if (!completing) return;
+   226→   226→    try {
+   227→   227→      await api.patch(`/api/meetings/${completing.id}`, {
+   228→   228→        status: "COMPLETED",
+   229→   229→        outcome: outcome.trim() || null,
+   230→   230→        nextAction: nextAction.trim() || null,
+   231→   231→      });
+   232→   232→      toast({ title: "Meeting completed" });
+   233→   233→      setCompleting(null);
+   234→   234→      setOutcome("");
+   235→   235→      setNextAction("");
+   236→   236→      load();
+   237→   237→    } catch (e) {
+   238→   238→      toast({ title: "Status change failed", description: e instanceof Error ? e.message : undefined });
+   239→   239→    }
+   240→   240→  };
+   241→   241→
+   242→   242→  const confirmDelete = async () => {
+   243→   243→    if (!deleting) return;
+   244→   244→    try {
+   245→   245→      await api.delete(`/api/meetings/${deleting.id}`);
+   246→   246→      toast({ title: "Meeting deleted" });
+   247→   247→      setDeleting(null);
+   248→   248→      load();
+   249→   249→    } catch (e) {
+   250→   250→      toast({ title: "Delete failed", description: e instanceof Error ? e.message : undefined });
+   251→   251→    }
+   252→   252→  };
+   253→   253→
+   254→   254→  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+   255→   255→
+   256→   256→  return (
+   257→   257→    <div>
+   258→   258→      <PageHeader
+   259→   259→        title="Meetings"
+   260→   260→        description="Schedule client and lead meetings, log outcomes and keep next actions visible."
+   261→   261→        actions={canCreate && <Button onClick={openCreate}><CalendarPlus className="w-4 h-4 mr-2" /> New Meeting</Button>}
+   262→   262→      />
+   263→   263→
+   264→   264→      {/* Filters */}
+   265→   265→      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+   266→   266→        <Input
+   267→   267→          placeholder="Search title, location, notes…"
+   268→   268→          value={search}
+   269→   269→          onChange={(e) => onSearchInput(e.target.value)}
+   270→   270→          className="sm:max-w-xs"
+   271→   271→        />
+   272→   272→        <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v)}>
+   273→   273→          <SelectTrigger className="sm:w-44"><SelectValue /></SelectTrigger>
+   274→   274→          <SelectContent>
+   275→   275→            <SelectItem value="ALL">All statuses</SelectItem>
+   276→   276→            <SelectItem value="SCHEDULED">Scheduled</SelectItem>
+   277→   277→            <SelectItem value="COMPLETED">Completed</SelectItem>
+   278→   278→            <SelectItem value="CANCELLED">Cancelled</SelectItem>
+   279→   279→            <SelectItem value="RESCHEDULED">Rescheduled</SelectItem>
+   280→   280→          </SelectContent>
+   281→   281→        </Select>
+   282→   282→      </div>
+   283→   283→
+   284→   284→      {loading ? (
+   285→   285→        <ListSkeleton />
+   286→   286→      ) : error ? (
+   287→   287→        <ErrorState onRetry={() => load()} />
+   288→   288→      ) : total === 0 ? (
+   289→   289→        <EmptyState
+   290→   290→          icon={<CalendarDays className="w-5 h-5" />}
+   291→   291→          title={query || statusFilter !== "ALL" ? "No meetings match your filters" : "No meetings scheduled"}
+   292→   292→          description={query || statusFilter !== "ALL" ? "Try adjusting the search or status filter." : "Schedule your first meeting with a lead or client."}
+   293→   293→          action={canCreate && !(query || statusFilter !== "ALL") ? <Button size="sm" onClick={openCreate}><CalendarPlus className="w-4 h-4 mr-2" /> New Meeting</Button> : undefined}
+   294→   294→        />
+   295→   295→      ) : (
+   296→   296→        <div className="space-y-6">
+   297→   297→          {groups.map((g) => (
+   298→   298→            <div key={g.key}>
+   299→   299→              <div className="flex items-center gap-2 mb-2">
+   300→   300→                <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.label}</h2>
+   301→   301→                <span className="text-[11px] text-muted-foreground/70">{g.rows.length}</span>
+   302→   302→                <div className="flex-1 h-px bg-border" />
+   303→   303→              </div>
+   304→   304→              <div className="apex-panel divide-y divide-border overflow-hidden">
+   305→   305→                {g.rows.map((m) => (
+   306→   306→                  <div key={m.id} className="p-4 hover:bg-accent/40 transition-colors">
+   307→   307→                    <div className="flex flex-col md:flex-row md:items-center gap-3">
+   308→   308→                      <button
+   309→   309→                        className="flex-1 min-w-0 text-left group"
+   310→   310→                        onClick={() => canEdit && openEdit(m)}
+   311→   311→                        title={canEdit ? "Open meeting" : undefined}
+   312→   312→                      >
+   313→   313→                        <div className="flex items-center gap-2 flex-wrap">
+   314→   314→                          <p className="font-medium truncate group-hover:text-primary transition-colors">{m.title}</p>
+   315→   315→                          <StatusBadge status={m.status} />
+   316→   316→                        </div>
+   317→   317→                        <div className="flex items-center gap-2 flex-wrap mt-1 text-xs text-muted-foreground">
+   318→   318→                          <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {formatDate(m.date)} · {m.startTime}–{m.endTime}</span>
+   319→   319→                          {m.lead && (
+   320→   320→                            <button className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent border border-border" onClick={(e) => { e.stopPropagation(); navigate("crm/leads"); }}>
+   321→   321→                              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" /> {m.lead.companyName}
+   322→   322→                            </button>
+   323→   323→                          )}
+   324→   324→                          {m.client && (
+   325→   325→                            <button className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent border border-border" onClick={(e) => { e.stopPropagation(); navigate("crm/clients"); }}>
+   326→   326→                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> {m.client.companyName}
+   327→   327→                            </button>
+   328→   328→                          )}
+   329→   329→                          {m.project && (
+   330→   330→                            <button className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-secondary hover:bg-accent border border-border" onClick={(e) => { e.stopPropagation(); navigate("projects"); }}>
+   331→   331→                              <span className="w-1.5 h-1.5 rounded-full bg-violet-400" /> {m.project.name}
+   332→   332→                            </button>
+   333→   333→                          )}
+   334→   334→                          {m.location && <span className="inline-flex items-center gap-1"><MapPin className="w-3 h-3" /> {m.location}</span>}
+   335→   335→                          {m.meetingLink && (
+   336→   336→                            <a href={m.meetingLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
+   337→   337→                              <ExternalLink className="w-3 h-3" /> Join link
+   338→   338→                            </a>
+   339→   339→                          )}
+   340→   340→                        </div>
+   341→   341→                        {m.status === "COMPLETED" && (m.outcome || m.nextAction) && (
+   342→   342→                          <div className="mt-2 flex items-start gap-2 text-xs">
+   343→   343→                            <StickyNote className="w-3.5 h-3.5 mt-0.5 text-muted-foreground shrink-0" />
+   344→   344→                            <span className="text-muted-foreground">
+   345→   345→                              {m.outcome && <span>Outcome: {m.outcome}</span>}
+   346→   346→                              {m.outcome && m.nextAction && <span className="mx-1.5 opacity-50">·</span>}
+   347→   347→                              {m.nextAction && <span>Next: {m.nextAction}</span>}
+   348→   348→                            </span>
+   349→   349→                          </div>
+   350→   350→                        )}
+   351→   351→                      </button>
+   352→   352→
+   353→   353→                      <div className="flex items-center gap-1.5 shrink-0 self-end md:self-center">
+   354→   354→                        {canEdit && (
+   355→   355→                          <DropdownMenu>
+   356→   356→                            <DropdownMenuTrigger asChild>
+   357→   357→                              <Button variant="outline" size="sm">Status <ChevronRight className="w-3.5 h-3.5 ml-1" /></Button>
+   358→   358→                            </DropdownMenuTrigger>
+   359→   359→                            <DropdownMenuContent align="end">
+   360→   360→                              {(m.status === "SCHEDULED" || m.status === "RESCHEDULED") && (
+   361→   361→                                <DropdownMenuItem onClick={() => { setCompleting(m); setOutcome(""); setNextAction(""); }}>
+   362→   362→                                  Mark completed
+   363→   363→                                </DropdownMenuItem>
+   364→   364→                              )}
+   365→   365→                              {(m.status === "RESCHEDULED" || m.status === "CANCELLED") && (
+   366→   366→                                <DropdownMenuItem onClick={() => changeStatus(m, "SCHEDULED")}>Mark scheduled</DropdownMenuItem>
+   367→   367→                              )}
+   368→   368→                              {m.status === "SCHEDULED" && (
+   369→   369→                                <DropdownMenuItem onClick={() => changeStatus(m, "RESCHEDULED")}>Mark rescheduled</DropdownMenuItem>
+   370→   370→                              )}
+   371→   371→                              {m.status !== "COMPLETED" && m.status !== "CANCELLED" && (
+   372→   372→                                <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => changeStatus(m, "CANCELLED")}>
+   373→   373→                                  Cancel meeting
+   374→   374→                                </DropdownMenuItem>
+   375→   375→                              )}
+   376→   376→                              {canDelete && (
+   377→   377→                                <>
+   378→   378→                                  <DropdownMenuSeparator />
+   379→   379→                                  <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setDeleting(m)}>
+   380→   380→                                    <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
+   381→   381→                                  </DropdownMenuItem>
+   382→   382→                                </>
+   383→   383→                              )}
+   384→   384→                            </DropdownMenuContent>
+   385→   385→                          </DropdownMenu>
+   386→   386→                        )}
+   387→   387→                        {canEdit && (
+   388→   388→                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(m)} title="Edit">
+   389→   389→                            <Pencil className="w-3.5 h-3.5" />
+   390→   390→                          </Button>
+   391→   391→                        )}
+   392→   392→                        {!canEdit && !canDelete && (
+   393→   393→                          <DropdownMenu>
+   394→   394→                            <DropdownMenuTrigger asChild>
+   395→   395→                              <Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="w-4 h-4" /></Button>
+   396→   396→                            </DropdownMenuTrigger>
+   397→   397→                            <DropdownMenuContent align="end"><DropdownMenuItem disabled>No actions available</DropdownMenuItem></DropdownMenuContent>
+   398→   398→                          </DropdownMenu>
+   399→   399→                        )}
+   400→   400→                      </div>
+   401→   401→                    </div>
+   402→   402→                  </div>
+   403→   403→                ))}
+   404→   404→              </div>
+   405→   405→            </div>
+   406→   406→          ))}
+   407→   407→
+   408→   408→          {/* Pagination */}
+   409→   409→          {totalPages > 1 && (
+   410→   410→            <div className="flex items-center justify-between text-sm">
+   411→   411→              <p className="text-muted-foreground">Page {page} of {totalPages} · {total} meetings</p>
+   412→   412→              <div className="flex gap-2">
+   413→   413→                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => load({ page: page - 1 })}>Previous</Button>
+   414→   414→                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => load({ page: page + 1 })}>Next</Button>
+   415→   415→              </div>
+   416→   416→            </div>
+   417→   417→          )}
+   418→   418→        </div>
+   419→   419→      )}
+   420→   420→
+   421→   421→      {/* Create / Edit dialog */}
+   422→   422→      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+   423→   423→        <DialogContent className="sm:max-w-lg">
+   424→   424→          <DialogHeader>
+   425→   425→            <DialogTitle>{editing ? "Edit meeting" : "New meeting"}</DialogTitle>
+   426→   426→            <DialogDescription>
+   427→   427→              {editing ? "Update the schedule or details of this meeting." : "Link it to a lead, client or project to keep the timeline connected."}
+   428→   428→            </DialogDescription>
+   429→   429→          </DialogHeader>
+   430→   430→          <div className="max-h-[65vh] overflow-y-auto apex-scroll pr-1 space-y-4">
+   431→   431→            <Field label="Title" required>
+   432→   432→              <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Requirements workshop with Nile" />
+   433→   433→            </Field>
+   434→   434→            <div className="grid grid-cols-3 gap-3">
+   435→   435→              <Field label="Date" required>
+   436→   436→                <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+   437→   437→              </Field>
+   438→   438→              <Field label="Start" required>
+   439→   439→                <Input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} />
+   440→   440→              </Field>
+   441→   441→              <Field label="End" required>
+   442→   442→                <Input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} />
+   443→   443→              </Field>
+   444→   444→            </div>
+   445→   445→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   446→   446→              {leadOpts.length > 0 ? (
+   447→   447→                <Field label="Linked lead">
+   448→   448→                  <Select value={form.leadId || "NONE"} onValueChange={(v) => setForm({ ...form, leadId: v === "NONE" ? "" : v, clientId: "" })}>
+   449→   449→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   450→   450→                    <SelectContent className="max-h-60">
+   451→   451→                      <SelectItem value="NONE">None</SelectItem>
+   452→   452→                      {leadOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   453→   453→                    </SelectContent>
+   454→   454→                  </Select>
+   455→   455→                </Field>
+   456→   456→              ) : (
+   457→   457→                <Field label="Linked lead" hint={optsTried ? "Lead list unavailable — type a reference name instead" : undefined}>
+   458→   458→                  <Input value={form.relatedName} onChange={(e) => setForm({ ...form, relatedName: e.target.value })} placeholder="Company / person (unlinked)" disabled={!!form.clientId} />
+   459→   459→                </Field>
+   460→   460→              )}
+   461→   461→              {clientOpts.length > 0 ? (
+   462→   462→                <Field label="Linked client">
+   463→   463→                  <Select value={form.clientId || "NONE"} onValueChange={(v) => setForm({ ...form, clientId: v === "NONE" ? "" : v, leadId: "" })}>
+   464→   464→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   465→   465→                    <SelectContent className="max-h-60">
+   466→   466→                      <SelectItem value="NONE">None</SelectItem>
+   467→   467→                      {clientOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   468→   468→                    </SelectContent>
+   469→   469→                  </Select>
+   470→   470→                </Field>
+   471→   471→              ) : (
+   472→   472→                <Field label="Linked client" hint={optsTried ? "Client list unavailable — type a reference name instead" : undefined}>
+   473→   473→                  <Input value={form.relatedName} onChange={(e) => setForm({ ...form, relatedName: e.target.value })} placeholder="Company (unlinked)" disabled={!!form.leadId} />
+   474→   474→                </Field>
+   475→   475→              )}
+   476→   476→            </div>
+   477→   477→            {projectOpts.length > 0 && (
+   478→   478→              <Field label="Linked project">
+   479→   479→                <Select value={form.projectId || "NONE"} onValueChange={(v) => setForm({ ...form, projectId: v === "NONE" ? "" : v })}>
+   480→   480→                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   481→   481→                  <SelectContent className="max-h-60">
+   482→   482→                    <SelectItem value="NONE">None</SelectItem>
+   483→   483→                    {projectOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   484→   484→                  </SelectContent>
+   485→   485→                </Select>
+   486→   486→              </Field>
+   487→   487→            )}
+   488→   488→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   489→   489→              <Field label="Location">
+   490→   490→                <Input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} placeholder="Office / client site" />
+   491→   491→              </Field>
+   492→   492→              <Field label="Meeting link">
+   493→   493→                <Input value={form.meetingLink} onChange={(e) => setForm({ ...form, meetingLink: e.target.value })} placeholder="https://meet.google.com/…" />
+   494→   494→              </Field>
+   495→   495→            </div>
+   496→   496→            <Field label="Notes">
+   497→   497→              <Textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} placeholder="Agenda, attendees, preparation…" />
+   498→   498→            </Field>
+   499→   499→          </div>
+   500→   500→          <DialogFooter>
+   501→   501→            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
+   502→   502→            <Button onClick={submit} disabled={saving}>{saving ? "Saving…" : editing ? "Save changes" : "Schedule meeting"}</Button>
+   503→   503→          </DialogFooter>
+   504→   504→        </DialogContent>
+   505→   505→      </Dialog>
+   506→   506→
+   507→   507→      {/* Complete dialog (outcome) */}
+   508→   508→      <Dialog open={!!completing} onOpenChange={(o) => !o && setCompleting(null)}>
+   509→   509→        <DialogContent className="sm:max-w-md">
+   510→   510→          <DialogHeader>
+   511→   511→            <DialogTitle>Complete meeting</DialogTitle>
+   512→   512→            <DialogDescription>Record what happened and what comes next.</DialogDescription>
+   513→   513→          </DialogHeader>
+   514→   514→          <div className="space-y-4">
+   515→   515→            <Field label="Outcome">
+   516→   516→              <Textarea value={outcome} onChange={(e) => setOutcome(e.target.value)} rows={3} placeholder="e.g. Client approved scope, wants the proposal by Sunday." />
+   517→   517→            </Field>
+   518→   518→            <Field label="Next action">
+   519→   519→              <Input value={nextAction} onChange={(e) => setNextAction(e.target.value)} placeholder="e.g. Send proposal before Thursday" />
+   520→   520→            </Field>
+   521→   521→          </div>
+   522→   522→          <DialogFooter>
+   523→   523→            <Button variant="outline" onClick={() => setCompleting(null)}>Cancel</Button>
+   524→   524→            <Button onClick={submitComplete}>Mark completed</Button>
+   525→   525→          </DialogFooter>
+   526→   526→        </DialogContent>
+   527→   527→      </Dialog>
+   528→   528→
+   529→   529→      {/* Delete confirm */}
+   530→   530→      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
+   531→   531→        <AlertDialogContent>
+   532→   532→          <AlertDialogHeader>
+   533→   533→            <AlertDialogTitle>Delete this meeting?</AlertDialogTitle>
+   534→   534→            <AlertDialogDescription>
+   535→   535→              &quot;{deleting?.title}&quot; will be permanently removed. This cannot be undone.
+   536→   536→            </AlertDialogDescription>
+   537→   537→          </AlertDialogHeader>
+   538→   538→          <AlertDialogFooter>
+   539→   539→            <AlertDialogCancel>Keep meeting</AlertDialogCancel>
+   540→   540→            <AlertDialogAction className={cn("bg-destructive text-destructive-foreground hover:bg-destructive/90")} onClick={confirmDelete}>
+   541→   541→              Delete
+   542→   542→            </AlertDialogAction>
+   543→   543→          </AlertDialogFooter>
+   544→   544→        </AlertDialogContent>
+   545→   545→      </AlertDialog>
+   546→   546→    </div>
+   547→   547→  );
+   548→   548→}
+   549→   549→

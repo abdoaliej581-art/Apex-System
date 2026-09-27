@@ -1,0 +1,639 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useMemo, useState } from "react";
+     4→import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, Field } from "@/components/shared";
+     5→import { api, qs, formatCurrency, formatDate } from "@/lib/api-client";
+     6→import { useSession } from "next-auth/react";
+     7→import { useToast } from "@/hooks/use-toast";
+     8→import { Button } from "@/components/ui/button";
+     9→import { Input } from "@/components/ui/input";
+    10→import { Textarea } from "@/components/ui/textarea";
+    11→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    12→import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+    13→import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+    14→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+    15→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+    16→import { ScrollArea } from "@/components/ui/scroll-area";
+    17→import { Progress } from "@/components/ui/progress";
+    18→import { relativeTime } from "@/lib/api-client";
+    19→import {
+    20→  FileSpreadsheet, Plus, Trash2, Send, Ban, Wallet, AlertCircle,
+    21→  Banknote, CircleDashed, X,
+    22→} from "lucide-react";
+    23→import { cn } from "@/lib/utils";
+    24→
+    25→type InvoiceItem = { description: string; quantity: number; unitPrice: number };
+    26→type ClientOption = { id: string; companyName: string; clientNumber: string };
+    27→type ProjectOption = { id: string; name: string; projectNumber: string; clientId: string };
+    28→
+    29→type InvoiceRow = {
+    30→  id: string; invoiceNumber: string; status: string; effectiveStatus: string; currency: string;
+    31→  subtotal: number; discountAmount: number; taxPercent: number; total: number; paidAmount: number; remaining: number;
+    32→  issueDate: string; dueDate: string | null; paymentTerms?: string | null; notes?: string | null;
+    33→  client: ClientOption | null; project: ProjectOption | null;
+    34→  items?: { id: string; description: string; quantity: number; unitPrice: number; total: number; order: number }[];
+    35→  payments?: { id: string; amount: number; date: string; method: string; reference?: string | null; notes?: string | null; recordedBy?: { name: string } | null }[];
+    36→  activities?: { id: string; type: string; title: string; actorName?: string | null; createdAt: string }[];
+    37→};
+    38→
+    39→const STATUS_OPTIONS = [
+    40→  { value: "ALL", label: "All statuses" },
+    41→  { value: "UNPAID", label: "Unpaid (open)" },
+    42→  { value: "OVERDUE", label: "Overdue" },
+    43→  { value: "DRAFT", label: "Draft" },
+    44→  { value: "SENT", label: "Sent" },
+    45→  { value: "PARTIALLY_PAID", label: "Partially paid" },
+    46→  { value: "PAID", label: "Paid" },
+    47→  { value: "CANCELLED", label: "Cancelled" },
+    48→];
+    49→
+    50→export function InvoicesView({ navigate }: { navigate: (p: string) => void }) {
+    51→  const { data: session } = useSession();
+    52→  const { toast } = useToast();
+    53→  const perms = session?.user?.permissions || [];
+    54→  const can = (p: string) => perms.includes(p);
+    55→
+    56→  const [rows, setRows] = useState<InvoiceRow[]>([]);
+    57→  const [summary, setSummary] = useState({ invoicedTotal: 0, paidTotal: 0 });
+    58→  const [total, setTotal] = useState(0);
+    59→  const [page, setPage] = useState(1);
+    60→  const [loading, setLoading] = useState(true);
+    61→  const [error, setError] = useState(false);
+    62→  const [q, setQ] = useState("");
+    63→  const [status, setStatus] = useState("ALL");
+    64→  const [reloadKey, setReloadKey] = useState(0);
+    65→
+    66→  const [createOpen, setCreateOpen] = useState(false);
+    67→  const [detailId, setDetailId] = useState<string | null>(null);
+    68→
+    69→  const pageSize = 15;
+    70→
+    71→  const load = useCallback(async () => {
+    72→    setLoading(true);
+    73→    setError(false);
+    74→    try {
+    75→      const data = await api.get<{ items: InvoiceRow[]; total: number; summary: { invoicedTotal: number; paidTotal: number } }>(
+    76→        `/api/invoices${qs({ q, status: status === "ALL" ? undefined : status, page, pageSize })}`
+    77→      );
+    78→      setRows(data.items);
+    79→      setTotal(data.total);
+    80→      setSummary(data.summary);
+    81→    } catch {
+    82→      setError(true);
+    83→    } finally {
+    84→      setLoading(false);
+    85→    }
+    86→  }, [q, status, page, reloadKey]);
+    87→
+    88→  useEffect(() => { load(); }, [load]);
+    89→  useEffect(() => { setPage(1); }, [q, status]);
+    90→
+    91→  const refresh = () => { setReloadKey((k) => k + 1); setDetailId(null); };
+    92→
+    93→  const outstanding = summary.invoicedTotal - summary.paidTotal;
+    94→  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    95→
+    96→  return (
+    97→    <div>
+    98→      <PageHeader
+    99→        title="Invoices"
+   100→        description="Billing lifecycle per client and project — send, track payments and never chase a number again."
+   101→        actions={can("invoices.create") ? (
+   102→          <Button onClick={() => setCreateOpen(true)} className="bg-primary text-primary-foreground hover:bg-primary/90">
+   103→            <Plus className="w-4 h-4 mr-2" /> New Invoice
+   104→          </Button>
+   105→        ) : undefined}
+   106→      />
+   107→
+   108→      {/* Finance summary strip */}
+   109→      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5">
+   110→        <div className="apex-panel p-4 flex items-center gap-3">
+   111→          <div className="w-9 h-9 rounded-lg bg-cyan-500/10 text-cyan-300 flex items-center justify-center"><FileSpreadsheet className="w-4 h-4" /></div>
+   112→          <div><p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Total invoiced</p><p className="text-lg font-semibold">{formatCurrency(summary.invoicedTotal)}</p></div>
+   113→        </div>
+   114→        <div className="apex-panel p-4 flex items-center gap-3">
+   115→          <div className="w-9 h-9 rounded-lg bg-emerald-500/10 text-emerald-300 flex items-center justify-center"><Banknote className="w-4 h-4" /></div>
+   116→          <div><p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Collected</p><p className="text-lg font-semibold text-emerald-300">{formatCurrency(summary.paidTotal)}</p></div>
+   117→        </div>
+   118→        <div className="apex-panel p-4 flex items-center gap-3">
+   119→          <div className="w-9 h-9 rounded-lg bg-amber-500/10 text-amber-300 flex items-center justify-center"><AlertCircle className="w-4 h-4" /></div>
+   120→          <div><p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Outstanding</p><p className="text-lg font-semibold text-amber-300">{formatCurrency(outstanding)}</p></div>
+   121→        </div>
+   122→      </div>
+   123→
+   124→      {/* Filters */}
+   125→      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+   126→        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search number, client or notes…" className="sm:max-w-xs bg-secondary/40" />
+   127→        <Select value={status} onValueChange={setStatus}>
+   128→          <SelectTrigger className="sm:w-44 bg-secondary/40"><SelectValue /></SelectTrigger>
+   129→          <SelectContent>
+   130→            {STATUS_OPTIONS.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
+   131→          </SelectContent>
+   132→        </Select>
+   133→      </div>
+   134→
+   135→      {loading ? <ListSkeleton rows={6} /> : error ? <ErrorState onRetry={load} /> : rows.length === 0 ? (
+   136→        <EmptyState
+   137→          icon={<FileSpreadsheet className="w-5 h-5" />}
+   138→          title={q || status !== "ALL" ? "No invoices match your filters" : "No invoices yet"}
+   139→          description={q || status !== "ALL" ? "Try clearing the search or choosing a different status." : "Create your first invoice from a client or project and start tracking revenue."}
+   140→          action={can("invoices.create") && !q && status === "ALL" ? <Button onClick={() => setCreateOpen(true)}><Plus className="w-4 h-4 mr-2" /> Create invoice</Button> : undefined}
+   141→        />
+   142→      ) : (
+   143→        <>
+   144→          <div className="apex-panel overflow-x-auto apex-scroll">
+   145→            <table className="w-full text-sm">
+   146→              <thead>
+   147→                <tr className="border-b border-border text-left text-xs text-muted-foreground uppercase tracking-wide">
+   148→                  <th className="px-4 py-3 font-medium">Invoice</th>
+   149→                  <th className="px-4 py-3 font-medium">Client</th>
+   150→                  <th className="px-4 py-3 font-medium hidden lg:table-cell">Project</th>
+   151→                  <th className="px-4 py-3 font-medium hidden md:table-cell">Issued</th>
+   152→                  <th className="px-4 py-3 font-medium">Due</th>
+   153→                  <th className="px-4 py-3 font-medium text-right">Total</th>
+   154→                  <th className="px-4 py-3 font-medium hidden xl:table-cell">Paid</th>
+   155→                  <th className="px-4 py-3 font-medium">Status</th>
+   156→                </tr>
+   157→              </thead>
+   158→              <tbody>
+   159→                {rows.map((inv) => {
+   160→                  const overdue = inv.effectiveStatus === "OVERDUE";
+   161→                  const paidPct = inv.total > 0 ? Math.min(100, (inv.paidAmount / inv.total) * 100) : 0;
+   162→                  return (
+   163→                    <tr key={inv.id} onClick={() => setDetailId(inv.id)} className="border-b border-border/60 hover:bg-accent/50 cursor-pointer transition-colors">
+   164→                      <td className="px-4 py-3 font-mono text-xs text-cyan-300 whitespace-nowrap">{inv.invoiceNumber}</td>
+   165→                      <td className="px-4 py-3 max-w-[180px] truncate">{inv.client?.companyName ?? "—"}</td>
+   166→                      <td className="px-4 py-3 hidden lg:table-cell max-w-[160px] truncate text-muted-foreground">{inv.project?.name ?? "—"}</td>
+   167→                      <td className="px-4 py-3 hidden md:table-cell text-muted-foreground whitespace-nowrap">{formatDate(inv.issueDate)}</td>
+   168→                      <td className={cn("px-4 py-3 whitespace-nowrap", overdue ? "text-rose-300 font-medium" : "text-muted-foreground")}>{formatDate(inv.dueDate)}</td>
+   169→                      <td className="px-4 py-3 text-right font-semibold whitespace-nowrap">{formatCurrency(inv.total, inv.currency)}</td>
+   170→                      <td className="px-4 py-3 hidden xl:table-cell min-w-[110px]">
+   171→                        <div className="flex items-center gap-2">
+   172→                          <Progress value={paidPct} className="h-1.5 flex-1" />
+   173→                          <span className="text-[10px] text-muted-foreground w-9 text-right">{Math.round(paidPct)}%</span>
+   174→                        </div>
+   175→                      </td>
+   176→                      <td className="px-4 py-3"><StatusBadge status={inv.effectiveStatus} /></td>
+   177→                    </tr>
+   178→                  );
+   179→                })}
+   180→              </tbody>
+   181→            </table>
+   182→          </div>
+   183→          <div className="flex items-center justify-between mt-3 text-xs text-muted-foreground">
+   184→            <span>{total} invoice{total === 1 ? "" : "s"}</span>
+   185→            <div className="flex gap-2">
+   186→              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Previous</Button>
+   187→              <span className="px-2 py-1.5">{page} / {totalPages}</span>
+   188→              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</Button>
+   189→            </div>
+   190→          </div>
+   191→        </>
+   192→      )}
+   193→
+   194→      <NewInvoiceDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={(id) => { setCreateOpen(false); load(); setDetailId(id); }} navigate={navigate} />
+   195→      {detailId && <InvoiceDetailSheet invoiceId={detailId} onClose={refresh} can={can} />}
+   196→    </div>
+   197→  );
+   198→}
+   199→
+   200→// ================= New Invoice Dialog =================
+   201→function NewInvoiceDialog({ open, onOpenChange, onCreated, navigate }: {
+   202→  open: boolean; onOpenChange: (o: boolean) => void; onCreated: (id: string) => void; navigate: (p: string) => void;
+   203→}) {
+   204→  const { toast } = useToast();
+   205→  const [clients, setClients] = useState<ClientOption[]>([]);
+   206→  const [projects, setProjects] = useState<ProjectOption[]>([]);
+   207→  const [clientId, setClientId] = useState("none");
+   208→  const [projectId, setProjectId] = useState("none");
+   209→  const [issueDate, setIssueDate] = useState(new Date().toISOString().slice(0, 10));
+   210→  const [dueDate, setDueDate] = useState("");
+   211→  const [currency, setCurrency] = useState("EGP");
+   212→  const [discountAmount, setDiscountAmount] = useState("");
+   213→  const [taxPercent, setTaxPercent] = useState("");
+   214→  const [paymentTerms, setPaymentTerms] = useState("");
+   215→  const [notes, setNotes] = useState("");
+   216→  const [items, setItems] = useState<InvoiceItem[]>([{ description: "", quantity: 1, unitPrice: 0 }]);
+   217→  const [saving, setSaving] = useState(false);
+   218→  const [loadErr, setLoadErr] = useState(false);
+   219→
+   220→  useEffect(() => {
+   221→    if (!open) return;
+   222→    setLoadErr(false);
+   223→    api.get<{ items: ClientOption[] }>("/api/clients?pageSize=100")
+   224→      .then((d) => setClients(d.items.filter((c) => c && typeof c.id === "string")))
+   225→      .catch(() => setLoadErr(true));
+   226→    api.get<{ items: ProjectOption[] }>("/api/projects?pageSize=100")
+   227→      .then((d) => setProjects(d.items.filter((p) => p && typeof p.id === "string")))
+   228→      .catch(() => setProjects([]));
+   229→  }, [open]);
+   230→
+   231→  const filteredProjects = projects.filter((p) => p.clientId === clientId);
+   232→  const subtotal = items.reduce((s, i) => s + (i.quantity || 0) * (i.unitPrice || 0), 0);
+   233→  const disc = Number(discountAmount) || 0;
+   234→  const tax = Number(taxPercent) || 0;
+   235→  const grand = Math.max(0, subtotal - disc) * (1 + tax / 100);
+   236→
+   237→  const setItem = (idx: number, patch: Partial<InvoiceItem>) =>
+   238→    setItems((arr) => arr.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+   239→
+   240→  const submit = async () => {
+   241→    const validItems = items.filter((i) => i.description.trim() && i.quantity > 0);
+   242→    if (clientId === "none") { toast({ title: "Client is required", variant: "destructive" }); return; }
+   243→    if (validItems.length === 0) { toast({ title: "Add at least one item with a description", variant: "destructive" }); return; }
+   244→    setSaving(true);
+   245→    try {
+   246→      const created = await api.post<InvoiceRow>("/api/invoices", {
+   247→        clientId,
+   248→        projectId: projectId !== "none" ? projectId : undefined,
+   249→        issueDate: new Date(`${issueDate}T12:00:00.000Z`).toISOString(),
+   250→        dueDate: dueDate ? new Date(`${dueDate}T12:00:00.000Z`).toISOString() : undefined,
+   251→        currency,
+   252→        discountAmount: disc,
+   253→        taxPercent: tax,
+   254→        paymentTerms: paymentTerms || undefined,
+   255→        notes: notes || undefined,
+   256→        items: validItems.map((i) => ({ description: i.description.trim(), quantity: Number(i.quantity), unitPrice: Number(i.unitPrice) })),
+   257→      });
+   258→      toast({ title: "Invoice created", description: `${created.invoiceNumber} — ${formatCurrency(created.total, created.currency)}` });
+   259→      onCreated(created.id);
+   260→      setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
+   261→      setClientId("none"); setProjectId("none"); setDiscountAmount(""); setTaxPercent(""); setNotes(""); setPaymentTerms("");
+   262→    } catch (e) {
+   263→      toast({ title: e instanceof Error ? e.message : "Failed to create invoice", variant: "destructive" });
+   264→    } finally {
+   265→      setSaving(false);
+   266→    }
+   267→  };
+   268→
+   269→  return (
+   270→    <Dialog open={open} onOpenChange={onOpenChange}>
+   271→      <DialogContent className="sm:max-w-2xl max-h-[92vh] overflow-y-auto apex-scroll">
+   272→        <DialogHeader>
+   273→          <DialogTitle>New invoice</DialogTitle>
+   274→        </DialogHeader>
+   275→        {loadErr ? (
+   276→          <EmptyState title="Client list unavailable" description="You need clients.view permission, or create a client first in the CRM module." action={<Button variant="outline" onClick={() => { onOpenChange(false); navigate("crm/clients"); }}>Go to Clients</Button>} />
+   277→        ) : (
+   278→          <div className="space-y-4 py-1">
+   279→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   280→              <Field label="Client" required>
+   281→                <Select value={clientId} onValueChange={(v) => { setClientId(v); setProjectId("none"); }}>
+   282→                  <SelectTrigger className="h-9 bg-secondary/40"><SelectValue placeholder="Select client" /></SelectTrigger>
+   283→                  <SelectContent>
+   284→                    <SelectItem value="none" disabled>Select a client</SelectItem>
+   285→                    {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.companyName}</SelectItem>)}
+   286→                  </SelectContent>
+   287→                </Select>
+   288→              </Field>
+   289→              <Field label="Project (optional)" hint={clientId !== "none" && filteredProjects.length === 0 ? "No projects for this client yet." : undefined}>
+   290→                <Select value={projectId} onValueChange={setProjectId} disabled={clientId === "none"}>
+   291→                  <SelectTrigger className="h-9 bg-secondary/40"><SelectValue placeholder="No project" /></SelectTrigger>
+   292→                  <SelectContent>
+   293→                    <SelectItem value="none">No project</SelectItem>
+   294→                    {filteredProjects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+   295→                  </SelectContent>
+   296→                </Select>
+   297→              </Field>
+   298→            </div>
+   299→
+   300→            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+   301→              <Field label="Issue date"><Input type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className="h-9 bg-secondary/40" /></Field>
+   302→              <Field label="Due date"><Input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="h-9 bg-secondary/40" /></Field>
+   303→              <Field label="Currency">
+   304→                <Select value={currency} onValueChange={setCurrency}>
+   305→                  <SelectTrigger className="h-9 bg-secondary/40"><SelectValue /></SelectTrigger>
+   306→                  <SelectContent>{["EGP", "USD", "SAR", "EUR"].map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+   307→                </Select>
+   308→              </Field>
+   309→              <Field label="Tax %"><Input type="number" min={0} max={100} step="0.5" value={taxPercent} onChange={(e) => setTaxPercent(e.target.value)} className="h-9 bg-secondary/40" placeholder="0" /></Field>
+   310→            </div>
+   311→
+   312→            {/* Items editor */}
+   313→            <div className="space-y-2">
+   314→              <div className="flex items-center justify-between">
+   315→                <p className="text-xs font-medium text-muted-foreground">ITEMS *</p>
+   316→                <Button type="button" variant="outline" size="sm" onClick={() => setItems((a) => [...a, { description: "", quantity: 1, unitPrice: 0 }])}>
+   317→                  <Plus className="w-3.5 h-3.5 mr-1" /> Add item
+   318→                </Button>
+   319→              </div>
+   320→              <div className="space-y-2">
+   321→                {items.map((it, idx) => (
+   322→                  <div key={idx} className="flex gap-2 items-center">
+   323→                    <Input value={it.description} onChange={(e) => setItem(idx, { description: e.target.value })} placeholder={`Item ${idx + 1} — e.g. Frontend development`} className="flex-1 h-9 bg-secondary/40" />
+   324→                    <Input type="number" min={0.5} step={0.5} value={it.quantity} onChange={(e) => setItem(idx, { quantity: Number(e.target.value) })} className="w-16 h-9 bg-secondary/40" aria-label="Quantity" />
+   325→                    <Input type="number" min={0} step={0.01} value={it.unitPrice} onChange={(e) => setItem(idx, { unitPrice: Number(e.target.value) })} className="w-24 h-9 bg-secondary/40" aria-label="Unit price" />
+   326→                    <span className="w-20 text-right text-xs text-muted-foreground hidden sm:block">{formatCurrency((it.quantity || 0) * (it.unitPrice || 0), "")}</span>
+   327→                    {items.length > 1 && (
+   328→                      <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-rose-300" onClick={() => setItems((a) => a.filter((_, i) => i !== idx))} aria-label="Remove item">
+   329→                        <X className="w-4 h-4" />
+   330→                      </Button>
+   331→                    )}
+   332→                  </div>
+   333→                ))}
+   334→              </div>
+   335→              <div className="flex flex-col items-end gap-0.5 pt-1 text-sm border-t border-border pt-3">
+   336→                <p className="text-muted-foreground text-xs">Subtotal: {formatCurrency(subtotal, currency)}</p>
+   337→                {disc > 0 && <p className="text-muted-foreground text-xs">Discount: −{formatCurrency(disc, currency)}</p>}
+   338→                {tax > 0 && <p className="text-muted-foreground text-xs">Tax ({tax}%): {formatCurrency(Math.max(0, subtotal - disc) * (tax / 100), currency)}</p>}
+   339→                <p className="font-semibold text-cyan-300">Total: {formatCurrency(grand, currency)}</p>
+   340→              </div>
+   341→            </div>
+   342→
+   343→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   344→              <Field label="Discount amount"><Input type="number" min={0} step={0.01} value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} className="h-9 bg-secondary/40" placeholder="0" /></Field>
+   345→              <Field label="Payment terms"><Input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} className="h-9 bg-secondary/40" placeholder="e.g. 50% upfront, 50% on delivery" /></Field>
+   346→            </div>
+   347→            <Field label="Notes"><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="bg-secondary/40" placeholder="Anything the client should know about this invoice…" /></Field>
+   348→
+   349→            <div className="flex justify-end gap-2 pt-2">
+   350→              <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   351→              <Button onClick={submit} disabled={saving} className="bg-primary text-primary-foreground hover:bg-primary/90">
+   352→                {saving ? "Creating…" : "Create invoice"}
+   353→              </Button>
+   354→            </div>
+   355→          </div>
+   356→        )}
+   357→      </DialogContent>
+   358→    </Dialog>
+   359→  );
+   360→}
+   361→
+   362→// ================= Invoice Detail Sheet =================
+   363→function InvoiceDetailSheet({ invoiceId, onClose, can }: {
+   364→  invoiceId: string; onClose: () => void; can: (p: string) => boolean;
+   365→}) {
+   366→  const { toast } = useToast();
+   367→  const [inv, setInv] = useState<InvoiceRow & { payments?: InvoiceRow["payments"]; activities?: InvoiceRow["activities"] } | null>(null);
+   368→  const [loading, setLoading] = useState(true);
+   369→  const [payOpen, setPayOpen] = useState(false);
+   370→  const [confirmAction, setConfirmAction] = useState<"SENT" | "CANCELLED" | "DELETE" | null>(null);
+   371→
+   372→  const load = useCallback(async () => {
+   373→    setLoading(true);
+   374→    try {
+   375→      setInv(await api.get<InvoiceRow>(`/api/invoices/${invoiceId}`));
+   376→    } catch {
+   377→      toast({ title: "Failed to load invoice", variant: "destructive" });
+   378→      onClose();
+   379→    } finally {
+   380→      setLoading(false);
+   381→    }
+   382→  }, [invoiceId]);
+   383→
+   384→  useEffect(() => { load(); }, [load]);
+   385→
+   386→  const doStatus = async (status: "SENT" | "CANCELLED") => {
+   387→    try {
+   388→      await api.patch(`/api/invoices/${invoiceId}`, { status });
+   389→      toast({ title: status === "SENT" ? "Invoice sent" : "Invoice cancelled" });
+   390→      setConfirmAction(null);
+   391→      load();
+   392→    } catch (e) {
+   393→      toast({ title: e instanceof Error ? e.message : "Action failed", variant: "destructive" });
+   394→    }
+   395→  };
+   396→
+   397→  const doDelete = async () => {
+   398→    try {
+   399→      await api.delete(`/api/invoices/${invoiceId}`);
+   400→      toast({ title: "Draft invoice deleted" });
+   401→      setConfirmAction(null);
+   402→      onClose();
+   403→    } catch (e) {
+   404→      toast({ title: e instanceof Error ? e.message : "Delete failed", variant: "destructive" });
+   405→    }
+   406→  };
+   407→
+   408→  const paidPct = inv && inv.total > 0 ? Math.min(100, (inv.paidAmount / inv.total) * 100) : 0;
+   409→
+   410→  return (
+   411→    <Sheet open onOpenChange={(o) => !o && onClose()}>
+   412→      <SheetContent side="right" className="w-full sm:max-w-[560px] p-0 overflow-y-auto apex-scroll">
+   413→        {loading || !inv ? (
+   414→          <div className="p-6 space-y-3"><ListSkeleton rows={5} /></div>
+   415→        ) : (
+   416→          <div className="p-6 space-y-5">
+   417→            <div className="flex items-start justify-between gap-3">
+   418→              <div>
+   419→                <SheetTitle className="font-mono text-cyan-300">{inv.invoiceNumber}</SheetTitle>
+   420→                <p className="text-sm text-muted-foreground mt-0.5">{inv.client?.companyName}{inv.project ? ` · ${inv.project.name}` : ""}</p>
+   421→              </div>
+   422→              <StatusBadge status={inv.effectiveStatus} />
+   423→            </div>
+   424→
+   425→            {/* Money box */}
+   426→            <div className="apex-panel p-4 space-y-2.5">
+   427→              <div className="flex items-center justify-between text-sm">
+   428→                <span className="text-muted-foreground">Total</span>
+   429→                <span className="font-semibold text-base">{formatCurrency(inv.total, inv.currency)}</span>
+   430→              </div>
+   431→              <Progress value={paidPct} className="h-2" />
+   432→              <div className="flex items-center justify-between text-xs text-muted-foreground">
+   433→                <span>Paid {formatCurrency(inv.paidAmount, inv.currency)} ({Math.round(paidPct)}%)</span>
+   434→                <span className={inv.remaining > 0 ? "text-amber-300 font-medium" : "text-emerald-300"}>
+   435→                  {inv.remaining > 0 ? `${formatCurrency(inv.remaining, inv.currency)} remaining` : "Fully paid"}
+   436→                </span>
+   437→              </div>
+   438→              <div className="grid grid-cols-2 gap-2 pt-1 text-xs text-muted-foreground">
+   439→                <p>Issued: <span className="text-foreground">{formatDate(inv.issueDate)}</span></p>
+   440→                <p>Due: <span className={inv.effectiveStatus === "OVERDUE" ? "text-rose-300" : "text-foreground"}>{formatDate(inv.dueDate)}</span></p>
+   441→              </div>
+   442→            </div>
+   443→
+   444→            {/* Actions */}
+   445→            <div className="flex flex-wrap gap-2">
+   446→              {can("payments.create") && !["PAID", "CANCELLED", "DRAFT"].includes(inv.status) && inv.remaining > 0 && (
+   447→                <Button size="sm" className="bg-emerald-500/90 hover:bg-emerald-500 text-emerald-950 font-semibold" onClick={() => setPayOpen(true)}>
+   448→                  <Wallet className="w-4 h-4 mr-1.5" /> Record payment
+   449→                </Button>
+   450→              )}
+   451→              {can("invoices.edit") && inv.status === "DRAFT" && (
+   452→                <Button size="sm" variant="outline" onClick={() => setConfirmAction("SENT")}>
+   453→                  <Send className="w-4 h-4 mr-1.5" /> Mark as sent
+   454→                </Button>
+   455→              )}
+   456→              {can("invoices.edit") && ["DRAFT", "SENT", "PARTIALLY_PAID"].includes(inv.status) && inv.paidAmount === 0 && (
+   457→                <Button size="sm" variant="outline" className="text-rose-300 border-rose-500/30" onClick={() => setConfirmAction("CANCELLED")}>
+   458→                  <Ban className="w-4 h-4 mr-1.5" /> Cancel invoice
+   459→                </Button>
+   460→              )}
+   461→              {can("invoices.delete") && inv.status === "DRAFT" && (
+   462→                <Button size="sm" variant="outline" className="text-rose-300 border-rose-500/30" onClick={() => setConfirmAction("DELETE")}>
+   463→                  <Trash2 className="w-4 h-4 mr-1.5" /> Delete draft
+   464→                </Button>
+   465→              )}
+   466→            </div>
+   467→
+   468→            <Tabs defaultValue="items">
+   469→              <TabsList className="w-full justify-start">
+   470→                <TabsTrigger value="items">Items</TabsTrigger>
+   471→                <TabsTrigger value="payments">Payments ({inv.payments?.length ?? 0})</TabsTrigger>
+   472→                <TabsTrigger value="history">History</TabsTrigger>
+   473→              </TabsList>
+   474→              <TabsContent value="items" className="mt-3">
+   475→                <div className="rounded-lg border border-border overflow-hidden">
+   476→                  <table className="w-full text-sm">
+   477→                    <tbody>
+   478→                      {(inv.items ?? []).map((it) => (
+   479→                        <tr key={it.id} className="border-b border-border/60 last:border-0">
+   480→                          <td className="px-3 py-2.5">{it.description}</td>
+   481→                          <td className="px-3 py-2.5 text-right text-muted-foreground whitespace-nowrap">{it.quantity} × {it.unitPrice.toLocaleString()}</td>
+   482→                          <td className="px-3 py-2.5 text-right font-medium whitespace-nowrap">{formatCurrency(it.total, inv.currency)}</td>
+   483→                        </tr>
+   484→                      ))}
+   485→                    </tbody>
+   486→                  </table>
+   487→                </div>
+   488→                <div className="text-xs text-muted-foreground mt-2 space-y-0.5 text-right">
+   489→                  <p>Subtotal: {formatCurrency(inv.subtotal, inv.currency)}</p>
+   490→                  {inv.discountAmount > 0 && <p>Discount: −{formatCurrency(inv.discountAmount, inv.currency)}</p>}
+   491→                  {inv.taxPercent > 0 && <p>Tax ({inv.taxPercent}%): {formatCurrency((inv.subtotal - inv.discountAmount) * (inv.taxPercent / 100), inv.currency)}</p>}
+   492→                </div>
+   493→              </TabsContent>
+   494→              <TabsContent value="payments" className="mt-3">
+   495→                {(inv.payments ?? []).length === 0 ? (
+   496→                  <p className="text-sm text-muted-foreground text-center py-6">No payments recorded yet.</p>
+   497→                ) : (
+   498→                  <div className="space-y-2">
+   499→                    {(inv.payments ?? []).map((p) => (
+   500→                      <div key={p.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+   501→                        <div>
+   502→                          <p className="text-sm font-medium text-emerald-300">{formatCurrency(p.amount, inv.currency)}</p>
+   503→                          <p className="text-xs text-muted-foreground">{formatDate(p.date)} · {p.method.replace(/_/g, " ")}{p.reference ? ` · ${p.reference}` : ""}</p>
+   504→                        </div>
+   505→                        <p className="text-[11px] text-muted-foreground">{p.recordedBy?.name ?? "—"}</p>
+   506→                      </div>
+   507→                    ))}
+   508→                  </div>
+   509→                )}
+   510→              </TabsContent>
+   511→              <TabsContent value="history" className="mt-3">
+   512→                {(inv.activities ?? []).length === 0 ? (
+   513→                  <p className="text-sm text-muted-foreground text-center py-6">No history yet.</p>
+   514→                ) : (
+   515→                  <div className="space-y-3">
+   516→                    {(inv.activities ?? []).map((a) => (
+   517→                      <div key={a.id} className="flex gap-2.5">
+   518→                        <CircleDashed className="w-3.5 h-3.5 text-cyan-400 mt-1 shrink-0" />
+   519→                        <div><p className="text-sm">{a.title}</p><p className="text-[11px] text-muted-foreground">{a.actorName ?? "System"} · {relativeTime(a.createdAt)}</p></div>
+   520→                      </div>
+   521→                    ))}
+   522→                  </div>
+   523→                )}
+   524→              </TabsContent>
+   525→            </Tabs>
+   526→
+   527→            {/* Confirmations (§70) */}
+   528→            <AlertDialog open={confirmAction !== null} onOpenChange={(o) => !o && setConfirmAction(null)}>
+   529→              <AlertDialogContent>
+   530→                <AlertDialogHeader>
+   531→                  <AlertDialogTitle>
+   532→                    {confirmAction === "SENT" && "Mark invoice as sent?"}
+   533→                    {confirmAction === "CANCELLED" && "Cancel this invoice?"}
+   534→                    {confirmAction === "DELETE" && "Delete this draft invoice?"}
+   535→                  </AlertDialogTitle>
+   536→                  <AlertDialogDescription>
+   537→                    {confirmAction === "SENT" && "Items and amounts become locked. You will still be able to record payments and cancel."}
+   538→                    {confirmAction === "CANCELLED" && "This may affect related records. Cancelled invoices stay in history for auditability."}
+   539→                    {confirmAction === "DELETE" && "Only drafts can be deleted. Sent invoices must be cancelled instead to preserve financial history."}
+   540→                  </AlertDialogDescription>
+   541→                </AlertDialogHeader>
+   542→                <AlertDialogFooter>
+   543→                  <AlertDialogCancel>Go back</AlertDialogCancel>
+   544→                  <AlertDialogAction
+   545→                    className={confirmAction === "SENT" ? "bg-primary text-primary-foreground" : "bg-rose-500/90 hover:bg-rose-500 text-white"}
+   546→                    onClick={() => confirmAction === "SENT" ? doStatus("SENT") : confirmAction === "CANCELLED" ? doStatus("CANCELLED") : doDelete()}
+   547→                  >
+   548→                    {confirmAction === "SENT" ? "Mark as sent" : confirmAction === "CANCELLED" ? "Cancel invoice" : "Delete draft"}
+   549→                  </AlertDialogAction>
+   550→                </AlertDialogFooter>
+   551→              </AlertDialogContent>
+   552→            </AlertDialog>
+   553→
+   554→            {payOpen && (
+   555→              <RecordPaymentDialog
+   556→                invoice={{ id: inv.id, invoiceNumber: inv.invoiceNumber, remaining: inv.remaining, currency: inv.currency, clientName: inv.client?.companyName ?? "" }}
+   557→                onClose={() => { setPayOpen(false); load(); }}
+   558→              />
+   559→            )}
+   560→          </div>
+   561→        )}
+   562→      </SheetContent>
+   563→    </Sheet>
+   564→  );
+   565→}
+   566→
+   567→// ================= Record Payment Dialog =================
+   568→export function RecordPaymentDialog({ invoice, onClose }: {
+   569→  invoice: { id: string; invoiceNumber: string; remaining: number; currency: string; clientName: string };
+   570→  onClose: () => void;
+   571→}) {
+   572→  const { toast } = useToast();
+   573→  const [amount, setAmount] = useState(String(invoice.remaining));
+   574→  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+   575→  const [method, setMethod] = useState("BANK_TRANSFER");
+   576→  const [reference, setReference] = useState("");
+   577→  const [notes, setNotes] = useState("");
+   578→  const [saving, setSaving] = useState(false);
+   579→
+   580→  const submit = async () => {
+   581→    const amt = Number(amount);
+   582→    if (!amt || amt <= 0) { toast({ title: "Enter a valid amount", variant: "destructive" }); return; }
+   583→    setSaving(true);
+   584→    try {
+   585→      await api.post("/api/payments", {
+   586→        invoiceId: invoice.id,
+   587→        amount: amt,
+   588→        date: new Date(`${date}T12:00:00.000Z`).toISOString(),
+   589→        method,
+   590→        reference: reference || undefined,
+   591→        notes: notes || undefined,
+   592→      });
+   593→      toast({ title: "Payment recorded", description: `${formatCurrency(amt, invoice.currency)} for ${invoice.invoiceNumber}` });
+   594→      onClose();
+   595→    } catch (e) {
+   596→      toast({ title: e instanceof Error ? e.message : "Failed to record payment", variant: "destructive" });
+   597→    } finally {
+   598→      setSaving(false);
+   599→    }
+   600→  };
+   601→
+   602→  return (
+   603→    <Dialog open onOpenChange={(o) => !o && onClose()}>
+   604→      <DialogContent className="sm:max-w-md">
+   605→        <DialogHeader>
+   606→          <DialogTitle>Record payment — {invoice.invoiceNumber}</DialogTitle>
+   607→        </DialogHeader>
+   608→        <div className="space-y-3.5 py-1">
+   609→          <p className="text-xs text-muted-foreground">{invoice.clientName} · remaining <span className="text-amber-300 font-medium">{formatCurrency(invoice.remaining, invoice.currency)}</span></p>
+   610→          <Field label="Amount" required>
+   611→            <Input type="number" min={0.01} step={0.01} value={amount} onChange={(e) => setAmount(e.target.value)} className="h-9 bg-secondary/40" />
+   612→          </Field>
+   613→          <div className="grid grid-cols-2 gap-3">
+   614→            <Field label="Date"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-9 bg-secondary/40" /></Field>
+   615→            <Field label="Method">
+   616→              <Select value={method} onValueChange={setMethod}>
+   617→                <SelectTrigger className="h-9 bg-secondary/40"><SelectValue /></SelectTrigger>
+   618→                <SelectContent>
+   619→                  {["BANK_TRANSFER", "CASH", "INSTAPAY", "VODAFONE_CASH", "PAYPAL", "OTHER"].map((m) => (
+   620→                    <SelectItem key={m} value={m}>{m.replace(/_/g, " ")}</SelectItem>
+   621→                  ))}
+   622→                </SelectContent>
+   623→              </Select>
+   624→            </Field>
+   625→          </div>
+   626→          <Field label="Reference"><Input value={reference} onChange={(e) => setReference(e.target.value)} className="h-9 bg-secondary/40" placeholder="Transfer / receipt number" /></Field>
+   627→          <Field label="Notes"><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="bg-secondary/40" /></Field>
+   628→          <div className="flex justify-end gap-2 pt-1">
+   629→            <Button variant="outline" onClick={onClose}>Cancel</Button>
+   630→            <Button onClick={submit} disabled={saving} className="bg-emerald-500/90 hover:bg-emerald-500 text-emerald-950 font-semibold">
+   631→              {saving ? "Saving…" : "Record payment"}
+   632→            </Button>
+   633→          </div>
+   634→        </div>
+   635→      </DialogContent>
+   636→    </Dialog>
+   637→  );
+   638→}
+   639→

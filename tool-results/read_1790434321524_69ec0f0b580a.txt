@@ -1,0 +1,725 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from "react";
+     4→import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, Field } from "@/components/shared";
+     5→import { api, qs, formatCurrency, formatDate, relativeTime } from "@/lib/api-client";
+     6→import { useSession } from "next-auth/react";
+     7→import { useToast } from "@/hooks/use-toast";
+     8→import { Button } from "@/components/ui/button";
+     9→import { Input } from "@/components/ui/input";
+    10→import { Textarea } from "@/components/ui/textarea";
+    11→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+    12→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+    13→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    14→import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+    15→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+    16→import { Separator } from "@/components/ui/separator";
+    17→import {
+    18→  ReceiptText, Plus, MoreHorizontal, Pencil, Trash2, Eye, Send, CheckCheck, XCircle,
+    19→  Clock, ArrowRight, RefreshCw,
+    20→} from "lucide-react";
+    21→import { cn } from "@/lib/utils";
+    22→
+    23→// ================= Types & helpers =================
+    24→
+    25→type Party = { id: string; companyName: string } | null | undefined;
+    26→
+    27→type QuotationListRow = {
+    28→  id: string; quotationNumber: string; title: string; status: string;
+    29→  currency: string; subtotal: number; discountAmount: number; taxPercent: number; total: number;
+    30→  validUntil?: string | null; createdAt: string;
+    31→  lead?: Party; client?: Party; _count?: { items: number };
+    32→};
+    33→
+    34→type QuotationItemRow = { id: string; description: string; quantity: number; unitPrice: number; total: number; order: number };
+    35→
+    36→type ActivityRow = { id: string; type: string; title: string; description?: string | null; actorName: string; actorColor: string; createdAt: string };
+    37→
+    38→type QuotationDetail = QuotationListRow & {
+    39→  leadId?: string | null; clientId?: string | null;
+    40→  paymentTerms?: string | null; notes?: string | null;
+    41→  items: QuotationItemRow[];
+    42→  lead?: Party; client?: Party;
+    43→  activities: ActivityRow[];
+    44→};
+    45→
+    46→type ItemDraft = { description: string; quantity: string; unitPrice: string };
+    47→type Option = { id: string; label: string };
+    48→
+    49→const num = (v: string): number => {
+    50→  const n = parseFloat(v);
+    51→  return Number.isFinite(n) ? n : 0;
+    52→};
+    53→const round2 = (n: number) => Math.round(n * 100) / 100;
+    54→
+    55→/** Mirrors the server formula: total = subtotal - discount + subtotal * tax% / 100 */
+    56→function previewTotals(items: ItemDraft[], discount: number, taxPercent: number) {
+    57→  const subtotal = round2(items.reduce((s, i) => s + num(i.quantity) * num(i.unitPrice), 0));
+    58→  const tax = round2((subtotal * taxPercent) / 100);
+    59→  return { subtotal, tax, total: round2(subtotal - discount + tax) };
+    60→}
+    61→
+    62→function extractList(data: unknown): Record<string, unknown>[] {
+    63→  if (Array.isArray(data)) return data as Record<string, unknown>[];
+    64→  if (data && typeof data === "object") {
+    65→    const obj = data as Record<string, unknown>;
+    66→    for (const key of ["items", "leads", "clients", "projects", "team"]) {
+    67→      if (Array.isArray(obj[key])) return obj[key] as Record<string, unknown>[];
+    68→    }
+    69→  }
+    70→  return [];
+    71→}
+    72→
+    73→function toOptions(url: string, labelKey: string): Promise<Option[]> {
+    74→  return api.get<unknown>(url)
+    75→    .then((data) => extractList(data).map((x) => ({ id: String(x.id), label: String(x[labelKey] ?? x.name ?? x.companyName ?? "") })).filter((o) => o.label))
+    76→    .catch(() => []);
+    77→}
+    78→
+    79→function toDateInput(d: string | Date): string {
+    80→  const x = new Date(d);
+    81→  const p = (n: number) => String(n).padStart(2, "0");
+    82→  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+    83→}
+    84→
+    85→const ACTIVE_STATUSES = ["DRAFT", "SENT"];
+    86→
+    87→// ================= Items editor =================
+    88→
+    89→function ItemsEditor({ items, onChange, currency }: { items: ItemDraft[]; onChange: (items: ItemDraft[]) => void; currency: string }) {
+    90→  const totals = previewTotals(items, 0, 0);
+    91→  return (
+    92→    <div className="rounded-lg border border-border overflow-hidden">
+    93→      <div className="hidden md:grid grid-cols-[1fr_90px_120px_110px_36px] gap-2 px-3 py-2 bg-secondary/50 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+    94→        <span>Description</span><span>Qty</span><span>Unit price</span><span className="text-right">Line total</span><span />
+    95→      </div>
+    96→      <div className="divide-y divide-border max-h-60 overflow-y-auto apex-scroll">
+    97→        {items.map((item, idx) => (
+    98→          <div key={idx} className="grid grid-cols-[1fr_72px_64px] md:grid-cols-[1fr_90px_120px_110px_36px] gap-2 px-3 py-2 items-center">
+    99→            <Input
+   100→              value={item.description}
+   101→              onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, description: e.target.value } : it)))}
+   102→              placeholder={`Item ${idx + 1} — e.g. Logo refresh`}
+   103→              className="col-span-3 md:col-span-1 h-8 text-sm"
+   104→            />
+   105→            <Input
+   106→              type="number" min={0} step={0.5} value={item.quantity}
+   107→              onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, quantity: e.target.value } : it)))}
+   108→              className="h-8 text-sm" aria-label="Quantity"
+   109→            />
+   110→            <Input
+   111→              type="number" min={0} step={0.01} value={item.unitPrice}
+   112→              onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, unitPrice: e.target.value } : it)))}
+   113→              className="h-8 text-sm" aria-label="Unit price"
+   114→            />
+   115→            <span className="hidden md:block text-sm font-medium text-right tabular-nums">
+   116→              {formatCurrency(round2(num(item.quantity) * num(item.unitPrice)), currency)}
+   117→            </span>
+   118→            <Button
+   119→              variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive justify-self-end"
+   120→              disabled={items.length <= 1}
+   121→              onClick={() => onChange(items.filter((_, i) => i !== idx))}
+   122→              title="Remove item"
+   123→            >
+   124→              <Trash2 className="w-3.5 h-3.5" />
+   125→            </Button>
+   126→          </div>
+   127→        ))}
+   128→      </div>
+   129→      <div className="flex items-center justify-between px-3 py-2 bg-secondary/30 border-t border-border">
+   130→        <Button variant="outline" size="sm" onClick={() => onChange([...items, { description: "", quantity: "1", unitPrice: "0" }])}>
+   131→          <Plus className="w-3.5 h-3.5 mr-1.5" /> Add item
+   132→        </Button>
+   133→        <p className="text-xs text-muted-foreground">Items subtotal: <span className="font-semibold text-foreground tabular-nums">{formatCurrency(totals.subtotal, currency)}</span></p>
+   134→      </div>
+   135→    </div>
+   136→  );
+   137→}
+   138→
+   139→// ================= Detail sheet =================
+   140→
+   141→function QuotationDetailSheet({ id, open, onOpenChange, onChanged, canEdit, canDelete, onDeleteRequest }: {
+   142→  id: string | null; open: boolean; onOpenChange: (o: boolean) => void; onChanged: () => void;
+   143→  canEdit: boolean; canDelete: boolean; onDeleteRequest: (row: QuotationListRow) => void;
+   144→}) {
+   145→  const { toast } = useToast();
+   146→  const [detail, setDetail] = useState<QuotationDetail | null>(null);
+   147→  const [loading, setLoading] = useState(false);
+   148→  const [acting, setActing] = useState(false);
+   149→
+   150→  const loadDetail = useCallback(async () => {
+   151→    if (!id) return;
+   152→    setLoading(true);
+   153→    try {
+   154→      setDetail(await api.get<QuotationDetail>(`/api/quotations/${id}`));
+   155→    } catch (e) {
+   156→      toast({ title: "Could not load quotation", description: e instanceof Error ? e.message : undefined });
+   157→    } finally {
+   158→      setLoading(false);
+   159→    }
+   160→  }, [id, toast]);
+   161→
+   162→  useEffect(() => {
+   163→    if (open && id) loadDetail();
+   164→    if (!open) setDetail(null);
+   165→  }, [open, id, loadDetail]);
+   166→
+   167→  const act = async (status: string, successTitle: string) => {
+   168→    if (!id) return;
+   169→    setActing(true);
+   170→    try {
+   171→      await api.patch(`/api/quotations/${id}`, { status });
+   172→      toast({ title: successTitle });
+   173→      await loadDetail();
+   174→      onChanged();
+   175→    } catch (e) {
+   176→      toast({ title: "Action failed", description: e instanceof Error ? e.message : undefined });
+   177→    } finally {
+   178→      setActing(false);
+   179→    }
+   180→  };
+   181→
+   182→  const currency = detail?.currency ?? "EGP";
+   183→  const active = detail ? ACTIVE_STATUSES.includes(detail.status) : false;
+   184→  const expired = detail?.validUntil ? new Date(detail.validUntil) < new Date() && active : false;
+   185→
+   186→  return (
+   187→    <Sheet open={open} onOpenChange={onOpenChange}>
+   188→      <SheetContent side="right" className="w-full sm:max-w-lg p-0 flex flex-col">
+   189→        {loading || !detail ? (
+   190→          <div className="p-6"><ListSkeleton rows={8} /></div>
+   191→        ) : (
+   192→          <>
+   193→            <SheetHeader className="p-5 pb-3 border-b border-border">
+   194→              <div className="flex items-start justify-between gap-3">
+   195→                <div className="min-w-0">
+   196→                  <SheetTitle className="flex items-center gap-2 text-base">
+   197→                    <ReceiptText className="w-4 h-4 text-primary shrink-0" /> {detail.quotationNumber}
+   198→                  </SheetTitle>
+   199→                  <SheetDescription className="mt-1 line-clamp-2">{detail.title}</SheetDescription>
+   200→                </div>
+   201→                <StatusBadge status={detail.status} />
+   202→              </div>
+   203→              <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+   204→                {["DRAFT", "SENT"].map((step, i) => {
+   205→                  const idx = ["DRAFT", "SENT"].indexOf(detail.status);
+   206→                  const done = idx >= 0 && i <= idx;
+   207→                  return (
+   208→                    <span
+   209→                      key={step}
+   210→                      className={cn(
+   211→                        "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium",
+   212→                        done ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground"
+   213→                      )}
+   214→                    >
+   215→                      <span className={cn("w-1.5 h-1.5 rounded-full", done ? "bg-primary" : "bg-muted-foreground/50")} />
+   216→                      {step.charAt(0) + step.slice(1).toLowerCase()}
+   217→                    </span>
+   218→                  );
+   219→                })}
+   220→                <ArrowRight className="w-3 h-3 text-muted-foreground/50" />
+   221→                <span className="inline-flex items-center px-2.5 py-1 rounded-full border border-dashed border-border text-[11px] text-muted-foreground">
+   222→                  {["ACCEPTED", "REJECTED", "EXPIRED"].includes(detail.status) ? detail.status.charAt(0) + detail.status.slice(1).toLowerCase() : "Pending decision"}
+   223→                </span>
+   224→              </div>
+   225→              {canEdit && ACTIVE_STATUSES.includes(detail.status) && (
+   226→                <div className="flex flex-wrap gap-2 mt-3">
+   227→                  {detail.status === "DRAFT" && (
+   228→                    <Button size="sm" onClick={() => act("SENT", "Quotation sent")} disabled={acting}>
+   229→                      <Send className="w-3.5 h-3.5 mr-1.5" /> Send quotation
+   230→                    </Button>
+   231→                  )}
+   232→                  <Button size="sm" className="bg-emerald-600 hover:bg-emerald-600/90 text-white" onClick={() => act("ACCEPTED", "Quotation accepted")} disabled={acting}>
+   233→                    <CheckCheck className="w-3.5 h-3.5 mr-1.5" /> Accept
+   234→                  </Button>
+   235→                  <Button size="sm" variant="outline" className="text-rose-300 hover:text-rose-200" onClick={() => act("REJECTED", "Quotation rejected")} disabled={acting}>
+   236→                    <XCircle className="w-3.5 h-3.5 mr-1.5" /> Reject
+   237→                  </Button>
+   238→                  <Button size="sm" variant="ghost" className="text-amber-300 hover:text-amber-200" onClick={() => act("EXPIRED", "Quotation marked expired")} disabled={acting}>
+   239→                    <Clock className="w-3.5 h-3.5 mr-1.5" /> Expire
+   240→                  </Button>
+   241→                </div>
+   242→              )}
+   243→            </SheetHeader>
+   244→
+   245→            <div className="flex-1 overflow-y-auto apex-scroll p-5 space-y-5">
+   246→              <div className="grid grid-cols-2 gap-3 text-sm">
+   247→                <div>
+   248→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Lead / Client</p>
+   249→                  <p className="font-medium">{detail.lead?.companyName ?? detail.client?.companyName ?? "Unlinked"}</p>
+   250→                </div>
+   251→                <div>
+   252→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Valid until</p>
+   253→                  <p className={cn("font-medium", expired && "text-rose-400")}>{formatDate(detail.validUntil)}{expired && " · expired"}</p>
+   254→                </div>
+   255→                <div>
+   256→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Created</p>
+   257→                  <p className="font-medium">{formatDate(detail.createdAt)}</p>
+   258→                </div>
+   259→              </div>
+   260→
+   261→              <div className="rounded-lg border border-border p-4 space-y-1.5">
+   262→                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Financials</p>
+   263→                <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span className="tabular-nums">{formatCurrency(detail.subtotal, currency)}</span></div>
+   264→                <div className="flex justify-between text-sm"><span className="text-muted-foreground">Discount</span><span className="tabular-nums">−{formatCurrency(detail.discountAmount, currency)}</span></div>
+   265→                <div className="flex justify-between text-sm"><span className="text-muted-foreground">Tax ({detail.taxPercent}%)</span><span className="tabular-nums">{formatCurrency(round2((detail.subtotal * detail.taxPercent) / 100), currency)}</span></div>
+   266→                <Separator className="my-2" />
+   267→                <div className="flex justify-between font-semibold"><span>Total</span><span className="tabular-nums text-primary">{formatCurrency(detail.total, currency)}</span></div>
+   268→              </div>
+   269→
+   270→              {detail.items.length > 0 && (
+   271→                <div>
+   272→                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Line items</p>
+   273→                  <div className="rounded-lg border border-border divide-y divide-border">
+   274→                    {detail.items.map((it) => (
+   275→                      <div key={it.id} className="flex items-start justify-between gap-3 px-3 py-2 text-sm">
+   276→                        <div className="min-w-0">
+   277→                          <p className="truncate">{it.description}</p>
+   278→                          <p className="text-[11px] text-muted-foreground">{it.quantity} × {formatCurrency(it.unitPrice, currency)}</p>
+   279→                        </div>
+   280→                        <span className="font-medium tabular-nums shrink-0">{formatCurrency(it.total, currency)}</span>
+   281→                      </div>
+   282→                    ))}
+   283→                  </div>
+   284→                </div>
+   285→              )}
+   286→
+   287→              {detail.paymentTerms && (
+   288→                <div>
+   289→                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Payment terms</p>
+   290→                  <p className="text-sm whitespace-pre-wrap">{detail.paymentTerms}</p>
+   291→                </div>
+   292→              )}
+   293→              {detail.notes && (
+   294→                <div>
+   295→                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Internal notes</p>
+   296→                  <p className="text-sm whitespace-pre-wrap">{detail.notes}</p>
+   297→                </div>
+   298→              )}
+   299→
+   300→              {canDelete && detail.status === "DRAFT" && (
+   301→                <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => onDeleteRequest(detail)}>
+   302→                  <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Delete draft
+   303→                </Button>
+   304→              )}
+   305→
+   306→              <div>
+   307→                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Activity</p>
+   308→                {detail.activities.length === 0 ? (
+   309→                  <p className="text-sm text-muted-foreground text-center py-6">No activity recorded yet.</p>
+   310→                ) : (
+   311→                  <div className="space-y-4">
+   312→                    {detail.activities.map((a) => (
+   313→                      <div key={a.id} className="flex gap-3">
+   314→                        <div
+   315→                          className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 border"
+   316→                          style={{ backgroundColor: `${a.actorColor}22`, color: a.actorColor, borderColor: `${a.actorColor}55` }}
+   317→                        >
+   318→                          {a.actorName.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
+   319→                        </div>
+   320→                        <div className="min-w-0">
+   321→                          <p className="text-sm leading-snug">{a.title}</p>
+   322→                          <p className="text-[11px] text-muted-foreground mt-0.5">{a.actorName} · {relativeTime(a.createdAt)}</p>
+   323→                        </div>
+   324→                      </div>
+   325→                    ))}
+   326→                  </div>
+   327→                )}
+   328→              </div>
+   329→            </div>
+   330→          </>
+   331→        )}
+   332→      </SheetContent>
+   333→    </Sheet>
+   334→  );
+   335→}
+   336→
+   337→// ================= Main view =================
+   338→
+   339→export function QuotationsView({ navigate }: { navigate: (p: string) => void }) {
+   340→  void navigate;
+   341→  const { toast } = useToast();
+   342→  const { data: session } = useSession();
+   343→  const perms = session?.user?.permissions || [];
+   344→  const canCreate = perms.includes("quotations.create");
+   345→  const canEdit = perms.includes("quotations.edit");
+   346→  const canDelete = perms.includes("quotations.delete");
+   347→
+   348→  const [rows, setRows] = useState<QuotationListRow[]>([]);
+   349→  const [total, setTotal] = useState(0);
+   350→  const [page, setPage] = useState(1);
+   351→  const [pageSize] = useState(25);
+   352→  const [loading, setLoading] = useState(true);
+   353→  const [error, setError] = useState(false);
+   354→  const [statusFilter, setStatusFilter] = useState("ALL");
+   355→  const [search, setSearch] = useState("");
+   356→  const [query, setQuery] = useState("");
+   357→  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+   358→
+   359→  const [builderOpen, setBuilderOpen] = useState(false);
+   360→  const [editingId, setEditingId] = useState<string | null>(null);
+   361→  const [saving, setSaving] = useState(false);
+   362→  const [form, setForm] = useState({
+   363→    title: "", leadId: "", clientId: "", validUntil: "", currency: "EGP",
+   364→    discountAmount: "0", taxPercent: "0", paymentTerms: "", notes: "",
+   365→  });
+   366→  const [items, setItems] = useState<ItemDraft[]>([{ description: "", quantity: "1", unitPrice: "0" }]);
+   367→  const [leadOpts, setLeadOpts] = useState<Option[]>([]);
+   368→  const [clientOpts, setClientOpts] = useState<Option[]>([]);
+   369→
+   370→  const [detailId, setDetailId] = useState<string | null>(null);
+   371→  const [sheetOpen, setSheetOpen] = useState(false);
+   372→  const [deleting, setDeleting] = useState<QuotationListRow | null>(null);
+   373→
+   374→  const load = useCallback(async (opts?: { page?: number; status?: string; q?: string }) => {
+   375→    const p = opts?.page ?? page;
+   376→    const st = opts?.status ?? statusFilter;
+   377→    const q = opts?.q ?? query;
+   378→    setLoading(true);
+   379→    setError(false);
+   380→    try {
+   381→      const data = await api.get<{ items: QuotationListRow[]; total: number }>(
+   382→        `/api/quotations${qs({ page: p, pageSize, status: st === "ALL" ? undefined : st, q: q || undefined })}`
+   383→      );
+   384→      setRows(data.items);
+   385→      setTotal(data.total);
+   386→      setPage(p);
+   387→    } catch (e) {
+   388→      setError(true);
+   389→      toast({ title: "Could not load quotations", description: e instanceof Error ? e.message : undefined });
+   390→    } finally {
+   391→      setLoading(false);
+   392→    }
+   393→  }, [page, statusFilter, query, pageSize, toast]);
+   394→
+   395→  useEffect(() => { load({ page: 1, status: statusFilter, q: query }); }, [statusFilter, query]);
+   396→
+   397→  useEffect(() => {
+   398→    Promise.all([toOptions("/api/leads?pageSize=100", "companyName"), toOptions("/api/clients?pageSize=100", "companyName")])
+   399→      .then(([l, c]) => { setLeadOpts(l); setClientOpts(c); });
+   400→  }, []);
+   401→
+   402→  const onSearchInput = (v: string) => {
+   403→    setSearch(v);
+   404→    if (debounce.current) clearTimeout(debounce.current);
+   405→    debounce.current = setTimeout(() => setQuery(v), 300);
+   406→  };
+   407→
+   408→  const openCreate = () => {
+   409→    setEditingId(null);
+   410→    setForm({ title: "", leadId: "", clientId: "", validUntil: "", currency: "EGP", discountAmount: "0", taxPercent: "0", paymentTerms: "", notes: "" });
+   411→    setItems([{ description: "", quantity: "1", unitPrice: "0" }]);
+   412→    setBuilderOpen(true);
+   413→  };
+   414→
+   415→  const openEdit = async (row: QuotationListRow) => {
+   416→    try {
+   417→      const d = await api.get<QuotationDetail>(`/api/quotations/${row.id}`);
+   418→      setEditingId(row.id);
+   419→      setForm({
+   420→        title: d.title, leadId: d.leadId ?? "", clientId: d.clientId ?? "",
+   421→        validUntil: d.validUntil ? toDateInput(d.validUntil) : "",
+   422→        currency: d.currency, discountAmount: String(d.discountAmount), taxPercent: String(d.taxPercent),
+   423→        paymentTerms: d.paymentTerms ?? "", notes: d.notes ?? "",
+   424→      });
+   425→      setItems(
+   426→        d.items.length > 0
+   427→          ? d.items.map((i) => ({ description: i.description, quantity: String(i.quantity), unitPrice: String(i.unitPrice) }))
+   428→          : [{ description: "", quantity: "1", unitPrice: "0" }]
+   429→      );
+   430→      setBuilderOpen(true);
+   431→    } catch (e) {
+   432→      toast({ title: "Could not load quotation", description: e instanceof Error ? e.message : undefined });
+   433→    }
+   434→  };
+   435→
+   436→  const submitBuilder = async () => {
+   437→    if (form.title.trim().length < 2) return toast({ title: "Title is required" });
+   438→    const cleaned = items.filter((i) => i.description.trim());
+   439→    if (cleaned.length === 0) return toast({ title: "Add at least one item with a description" });
+   440→    for (const i of cleaned) {
+   441→      if (num(i.quantity) <= 0) return toast({ title: `Quantity for "${i.description}" must be greater than 0` });
+   442→      if (num(i.unitPrice) < 0) return toast({ title: `Unit price for "${i.description}" cannot be negative` });
+   443→    }
+   444→    setSaving(true);
+   445→    try {
+   446→      const payload = {
+   447→        title: form.title.trim(),
+   448→        leadId: form.leadId || null,
+   449→        clientId: form.clientId || null,
+   450→        validUntil: form.validUntil || null,
+   451→        currency: form.currency,
+   452→        discountAmount: num(form.discountAmount),
+   453→        taxPercent: num(form.taxPercent),
+   454→        paymentTerms: form.paymentTerms || null,
+   455→        notes: form.notes || null,
+   456→        items: cleaned.map((i) => ({ description: i.description.trim(), quantity: num(i.quantity), unitPrice: num(i.unitPrice) })),
+   457→      };
+   458→      if (editingId) {
+   459→        await api.patch(`/api/quotations/${editingId}`, payload);
+   460→        toast({ title: "Quotation updated" });
+   461→      } else {
+   462→        await api.post("/api/quotations", payload);
+   463→        toast({ title: "Quotation created as draft" });
+   464→      }
+   465→      setBuilderOpen(false);
+   466→      load();
+   467→    } catch (e) {
+   468→      toast({ title: "Save failed", description: e instanceof Error ? e.message : undefined });
+   469→    } finally {
+   470→      setSaving(false);
+   471→    }
+   472→  };
+   473→
+   474→  const confirmDelete = async () => {
+   475→    if (!deleting) return;
+   476→    try {
+   477→      await api.delete(`/api/quotations/${deleting.id}`);
+   478→      toast({ title: "Draft deleted" });
+   479→      setDeleting(null);
+   480→      if (detailId === deleting.id) setSheetOpen(false);
+   481→      load();
+   482→    } catch (e) {
+   483→      toast({ title: "Delete failed", description: e instanceof Error ? e.message : undefined });
+   484→    }
+   485→  };
+   486→
+   487→  const totals = previewTotals(items, num(form.discountAmount), num(form.taxPercent));
+   488→  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+   489→
+   490→  return (
+   491→    <div>
+   492→      <PageHeader
+   493→        title="Quotations"
+   494→        description="Quick priced quotes with validity dates — the lightweight sibling of proposals."
+   495→        actions={canCreate && <Button onClick={openCreate}><Plus className="w-4 h-4 mr-2" /> New Quotation</Button>}
+   496→      />
+   497→
+   498→      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+   499→        <Input placeholder="Search number or title…" value={search} onChange={(e) => onSearchInput(e.target.value)} className="sm:max-w-xs" />
+   500→        <Select value={statusFilter} onValueChange={setStatusFilter}>
+   501→          <SelectTrigger className="sm:w-44"><SelectValue /></SelectTrigger>
+   502→          <SelectContent>
+   503→            <SelectItem value="ALL">All statuses</SelectItem>
+   504→            <SelectItem value="DRAFT">Draft</SelectItem>
+   505→            <SelectItem value="SENT">Sent</SelectItem>
+   506→            <SelectItem value="ACCEPTED">Accepted</SelectItem>
+   507→            <SelectItem value="REJECTED">Rejected</SelectItem>
+   508→            <SelectItem value="EXPIRED">Expired</SelectItem>
+   509→          </SelectContent>
+   510→        </Select>
+   511→      </div>
+   512→
+   513→      {loading ? (
+   514→        <ListSkeleton />
+   515→      ) : error ? (
+   516→        <ErrorState onRetry={() => load()} />
+   517→      ) : total === 0 ? (
+   518→        <EmptyState
+   519→          icon={<ReceiptText className="w-5 h-5" />}
+   520→          title={query || statusFilter !== "ALL" ? "No quotations match your filters" : "No quotations yet"}
+   521→          description={query || statusFilter !== "ALL" ? "Try adjusting the search or status filter." : "Send your first quick quote with priced items."}
+   522→          action={canCreate && !(query || statusFilter !== "ALL") ? <Button size="sm" onClick={openCreate}><Plus className="w-4 h-4 mr-2" /> New Quotation</Button> : undefined}
+   523→        />
+   524→      ) : (
+   525→        <div className="apex-panel overflow-x-auto">
+   526→          <table className="w-full text-sm">
+   527→            <thead>
+   528→              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+   529→                <th className="px-4 py-3 font-medium">Quotation #</th>
+   530→                <th className="px-4 py-3 font-medium">Title</th>
+   531→                <th className="px-4 py-3 font-medium hidden lg:table-cell">Lead / Client</th>
+   532→                <th className="px-4 py-3 font-medium text-right">Total</th>
+   533→                <th className="px-4 py-3 font-medium hidden md:table-cell">Status</th>
+   534→                <th className="px-4 py-3 font-medium hidden xl:table-cell">Valid until</th>
+   535→                <th className="px-4 py-3 font-medium text-right">Actions</th>
+   536→              </tr>
+   537→            </thead>
+   538→            <tbody className="divide-y divide-border">
+   539→              {rows.map((r) => {
+   540→                const expired = r.validUntil ? new Date(r.validUntil) < new Date() && ACTIVE_STATUSES.includes(r.status) : false;
+   541→                return (
+   542→                  <tr key={r.id} className="hover:bg-accent/40 transition-colors">
+   543→                    <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{r.quotationNumber}</td>
+   544→                    <td className="px-4 py-3">
+   545→                      <button className="text-left font-medium hover:text-primary transition-colors" onClick={() => { setDetailId(r.id); setSheetOpen(true); }}>
+   546→                        {r.title}
+   547→                      </button>
+   548→                      <p className="text-[11px] text-muted-foreground mt-0.5 lg:hidden">{r.lead?.companyName ?? r.client?.companyName ?? "Unlinked"}</p>
+   549→                    </td>
+   550→                    <td className="px-4 py-3 hidden lg:table-cell text-muted-foreground">{r.lead?.companyName ?? r.client?.companyName ?? "Unlinked"}</td>
+   551→                    <td className="px-4 py-3 text-right font-medium tabular-nums whitespace-nowrap">{formatCurrency(r.total, r.currency)}</td>
+   552→                    <td className="px-4 py-3 hidden md:table-cell"><StatusBadge status={r.status} /></td>
+   553→                    <td className={cn("px-4 py-3 hidden xl:table-cell whitespace-nowrap", expired ? "text-rose-400" : "text-muted-foreground")}>
+   554→                      {formatDate(r.validUntil)}{expired && " · expired"}
+   555→                    </td>
+   556→                    <td className="px-4 py-3 text-right">
+   557→                      <div className="inline-flex items-center gap-1">
+   558→                        <Button variant="ghost" size="icon" className="h-8 w-8" title="View" onClick={() => { setDetailId(r.id); setSheetOpen(true); }}>
+   559→                          <Eye className="w-3.5 h-3.5" />
+   560→                        </Button>
+   561→                        {canEdit && !["ACCEPTED", "REJECTED", "EXPIRED"].includes(r.status) && (
+   562→                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(r)}>
+   563→                            <Pencil className="w-3.5 h-3.5" />
+   564→                          </Button>
+   565→                        )}
+   566→                        {canDelete && r.status === "DRAFT" && (
+   567→                          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" title="Delete draft" onClick={() => setDeleting(r)}>
+   568→                            <Trash2 className="w-3.5 h-3.5" />
+   569→                          </Button>
+   570→                        )}
+   571→                        {!canEdit && !canDelete && (
+   572→                          <DropdownMenu>
+   573→                            <DropdownMenuTrigger asChild>
+   574→                              <Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="w-4 h-4" /></Button>
+   575→                            </DropdownMenuTrigger>
+   576→                            <DropdownMenuContent align="end"><DropdownMenuItem disabled>No actions available</DropdownMenuItem></DropdownMenuContent>
+   577→                          </DropdownMenu>
+   578→                        )}
+   579→                      </div>
+   580→                    </td>
+   581→                  </tr>
+   582→                );
+   583→              })}
+   584→            </tbody>
+   585→          </table>
+   586→        </div>
+   587→      )}
+   588→
+   589→      {totalPages > 1 && (
+   590→        <div className="flex items-center justify-between text-sm mt-4">
+   591→          <p className="text-muted-foreground">Page {page} of {totalPages} · {total} quotations</p>
+   592→          <div className="flex gap-2">
+   593→            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => load({ page: page - 1 })}>Previous</Button>
+   594→            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => load({ page: page + 1 })}>Next</Button>
+   595→          </div>
+   596→        </div>
+   597→      )}
+   598→
+   599→      {/* Builder dialog */}
+   600→      <Dialog open={builderOpen} onOpenChange={setBuilderOpen}>
+   601→        <DialogContent className="sm:max-w-2xl">
+   602→          <DialogHeader>
+   603→            <DialogTitle>{editingId ? "Edit quotation" : "New quotation"}</DialogTitle>
+   604→            <DialogDescription>Totals are always recalculated on the server from the line items below.</DialogDescription>
+   605→          </DialogHeader>
+   606→          <div className="max-h-[70vh] overflow-y-auto apex-scroll pr-1 space-y-4">
+   607→            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+   608→              <Field label="Title" required>
+   609→                <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Social media retainer" />
+   610→              </Field>
+   611→              <Field label="Currency">
+   612→                <Select value={form.currency} onValueChange={(v) => setForm({ ...form, currency: v })}>
+   613→                  <SelectTrigger><SelectValue /></SelectTrigger>
+   614→                  <SelectContent>
+   615→                    <SelectItem value="EGP">EGP</SelectItem>
+   616→                    <SelectItem value="USD">USD</SelectItem>
+   617→                    <SelectItem value="SAR">SAR</SelectItem>
+   618→                  </SelectContent>
+   619→                </Select>
+   620→              </Field>
+   621→              <Field label="Valid until">
+   622→                <Input type="date" value={form.validUntil} onChange={(e) => setForm({ ...form, validUntil: e.target.value })} />
+   623→              </Field>
+   624→            </div>
+   625→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   626→              {leadOpts.length > 0 ? (
+   627→                <Field label="Linked lead">
+   628→                  <Select value={form.leadId || "NONE"} onValueChange={(v) => setForm({ ...form, leadId: v === "NONE" ? "" : v, clientId: "" })}>
+   629→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   630→                    <SelectContent className="max-h-60">
+   631→                      <SelectItem value="NONE">None</SelectItem>
+   632→                      {leadOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   633→                    </SelectContent>
+   634→                  </Select>
+   635→                </Field>
+   636→              ) : (
+   637→                <Field label="Linked lead" hint="Lead list unavailable — the quotation will be unlinked">
+   638→                  <Input value={form.leadId} disabled placeholder="Unavailable without leads.view" />
+   639→                </Field>
+   640→              )}
+   641→              {clientOpts.length > 0 ? (
+   642→                <Field label="Linked client">
+   643→                  <Select value={form.clientId || "NONE"} onValueChange={(v) => setForm({ ...form, clientId: v === "NONE" ? "" : v, leadId: "" })}>
+   644→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   645→                    <SelectContent className="max-h-60">
+   646→                      <SelectItem value="NONE">None</SelectItem>
+   647→                      {clientOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   648→                    </SelectContent>
+   649→                  </Select>
+   650→                </Field>
+   651→              ) : (
+   652→                <Field label="Linked client" hint="Client list unavailable — the quotation will be unlinked">
+   653→                  <Input value={form.clientId} disabled placeholder="Unavailable without clients.view" />
+   654→                </Field>
+   655→              )}
+   656→            </div>
+   657→
+   658→            <div>
+   659→              <p className="text-xs font-medium text-muted-foreground mb-2">Line items</p>
+   660→              <ItemsEditor items={items} onChange={setItems} currency={form.currency} />
+   661→              <div className="mt-3 rounded-lg border border-border bg-secondary/30 p-4">
+   662→                <div className="grid grid-cols-2 gap-3">
+   663→                  <Field label="Discount amount">
+   664→                    <Input type="number" min={0} step={0.01} value={form.discountAmount} onChange={(e) => setForm({ ...form, discountAmount: e.target.value })} />
+   665→                  </Field>
+   666→                  <Field label="Tax percent">
+   667→                    <Input type="number" min={0} max={100} step={0.01} value={form.taxPercent} onChange={(e) => setForm({ ...form, taxPercent: e.target.value })} />
+   668→                  </Field>
+   669→                </div>
+   670→                <Separator className="my-3" />
+   671→                <div className="space-y-1.5 text-sm">
+   672→                  <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="tabular-nums">{formatCurrency(totals.subtotal, form.currency)}</span></div>
+   673→                  <div className="flex justify-between"><span className="text-muted-foreground">Tax ({num(form.taxPercent)}%)</span><span className="tabular-nums">{formatCurrency(totals.tax, form.currency)}</span></div>
+   674→                  <div className="flex justify-between font-semibold"><span>Total</span><span className="tabular-nums text-primary">{formatCurrency(totals.total, form.currency)}</span></div>
+   675→                </div>
+   676→              </div>
+   677→            </div>
+   678→
+   679→            <Field label="Payment terms">
+   680→              <Textarea rows={2} value={form.paymentTerms} onChange={(e) => setForm({ ...form, paymentTerms: e.target.value })} placeholder="e.g. Full payment on delivery" />
+   681→            </Field>
+   682→            <Field label="Internal notes">
+   683→              <Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Notes the client will never see" />
+   684→            </Field>
+   685→          </div>
+   686→          <DialogFooter>
+   687→            <Button variant="outline" onClick={() => setBuilderOpen(false)}>Cancel</Button>
+   688→            <Button onClick={submitBuilder} disabled={saving}>
+   689→              {saving ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : null}
+   690→              {editingId ? "Save changes" : "Create quotation"}
+   691→            </Button>
+   692→          </DialogFooter>
+   693→        </DialogContent>
+   694→      </Dialog>
+   695→
+   696→      {/* Detail sheet */}
+   697→      <QuotationDetailSheet
+   698→        id={detailId}
+   699→        open={sheetOpen}
+   700→        onOpenChange={setSheetOpen}
+   701→        onChanged={() => load()}
+   702→        canEdit={canEdit}
+   703→        canDelete={canDelete}
+   704→        onDeleteRequest={(row) => setDeleting(row)}
+   705→      />
+   706→
+   707→      {/* Delete confirm */}
+   708→      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
+   709→        <AlertDialogContent>
+   710→          <AlertDialogHeader>
+   711→            <AlertDialogTitle>Delete this draft?</AlertDialogTitle>
+   712→            <AlertDialogDescription>
+   713→              {deleting ? `${deleting.quotationNumber} — ${deleting.title}` : ""} will be permanently removed. Only drafts can be deleted.
+   714→            </AlertDialogDescription>
+   715→          </AlertDialogHeader>
+   716→          <AlertDialogFooter>
+   717→            <AlertDialogCancel>Keep draft</AlertDialogCancel>
+   718→            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={confirmDelete}>Delete</AlertDialogAction>
+   719→          </AlertDialogFooter>
+   720→        </AlertDialogContent>
+   721→      </AlertDialog>
+   722→    </div>
+   723→  );
+   724→}
+   725→

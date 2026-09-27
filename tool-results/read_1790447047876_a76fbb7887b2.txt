@@ -1,0 +1,450 @@
+     1→# APEX SYSTEM — Master Handover Document
+     2→**Internal Business Operating System for APEX (4-person Egyptian software team)**
+     3→Tagline: "Run APEX. One System. One Workflow."
+     4→
+     5→---
+     6→
+     7→## 1. PRODUCT ARCHITECTURE
+     8→
+     9→One centralized system connecting: Marketing → Leads → CRM → Sales → Meetings → Proposals → Contracts → Clients → Projects → Tasks → Team → Files → Invoices → Payments → Support → Maintenance → Analytics.
+    10→
+    11→**Core principle:** ONE CLIENT → ONE SOURCE OF TRUTH → COMPLETE BUSINESS HISTORY.
+    12→
+    13→### Tech Stack (locked)
+    14→- Next.js 16 App Router + TypeScript (strict)
+    15→- Prisma ORM + SQLite (`db/custom.db`)
+    16→- NextAuth v4 (credentials + JWT, bcryptjs hashing)
+    17→- Tailwind CSS 4 + shadcn/ui (New York) + Lucide
+    18→- Zustand (client state), TanStack Query available, @dnd-kit (Kanban DnD), recharts (charts), zod (validation), date-fns
+    19→- **Single visible route `/`** (sandbox constraint) → internal SPA with **hash routing** (`#/crm/leads`). All backend = `/api/*` route handlers.
+    20→
+    21→### Brand / UI Direction
+    22→- Background: Deep Navy / Slate (dark-first): `--background: #0A1120`, panels `#0F1830`, borders `slate-800`
+    23→- Primary accent: Electric Blue / Cyan (`#22d3ee` / `#38bdf8` family)
+    24→- Text: White / Light Gray. Premium, dense-but-readable, minimal motion, no glassmorphism spam.
+    25→- Logo: APEX apex/peak mark (▲ triangle with cyan gradient bar).
+    26→
+    27→### Login Credentials (seeded — change after first login!)
+    28→| Email | Password | Role |
+    29→|---|---|---|
+    30→| admin@apex.system | Apex@2026 | Super Admin |
+    31→| sales@apex.system | Apex@2026 | Sales |
+    32→| pm@apex.system | Apex@2026 | Project Manager |
+    33→| dev@apex.system | Apex@2026 | Developer |
+    34→
+    35→---
+    36→
+    37→## 2. PERMISSION MATRIX (server-enforced)
+    38→
+    39→Static list in `src/lib/permissions.ts`. Format `module.action`. Roles (DB) hold permission arrays. `requirePermission("leads.view")` in EVERY API route. Frontend nav/buttons filtered by permissions (never the only gate).
+    40→
+    41→Modules: leads, followups, clients, contacts, activities, meetings, proposals, quotations, contracts, projects, tasks, team, invoices, payments, expenses, content, campaigns, marketing.analytics, tickets, maintenance, kb, reports, audit, settings, automations, notifications.
+    42→Actions: view, create, edit, delete + specials (leads.assign, leads.export, projects.assign, tasks.assign, team.manage, permissions.manage, settings.manage).
+    43→
+    44→Default roles: SUPER_ADMIN(all), ADMIN(all), SALES(crm+sales+dashboard), PROJECT_MANAGER(projects+tasks+team.view+reports+calendar), DEVELOPER(tasks+projects.view), DESIGNER(tasks+projects.view), MARKETING(marketing+leads.view), SUPPORT(tickets+maintenance).
+    45→
+    46→---
+    47→
+    48→## 3. NUMBERING SYSTEM (configurable via Settings)
+    49→`APX-L-YYYY-####` leads, `APX-CLT-` clients, `APX-P-` proposals, `APX-Q-` quotations, `APX-C-` contracts, `APX-PRJ-` projects, `APX-INV-` invoices, `APX-T-` tickets. Helper: `src/lib/numbering.ts` (per-key counter in Setting table, year-aware).
+    50→
+    51→---
+    52→
+    53→## 4. DATABASE (Prisma / SQLite — full schema in prisma/schema.prisma)
+    54→users/roles, leads, follow_ups, clients, contacts, activities (polymorphic entityType+entityId), meetings, proposals(+items), quotations(+items), contracts, projects, project_members, project_phases, tasks(+comments+checklist), files(metadata only), invoices(+items), payments, expenses, campaigns, contents, tickets(+messages), maintenance_plans, notifications, knowledge_articles, automations, audit_logs, settings.
+    55→- Statuses stored as String + zod validation (SQLite-friendly, configurable).
+    56→- Soft-delete: `deletedAt`/`archivedAt` on important entities. Timestamps everywhere. Indexes on status, assignedToId, clientId, projectId, dueDate, createdAt.
+    57→
+    58→## 5. API CONTRACT
+    59→- Response: `{ success: true, data }` or `{ success: false, error: { code, message } }`
+    60→- Auth: every route calls `requireAuth()` / `requirePermission("x.y")` from `src/lib/api-helpers.ts`.
+    61→- List routes support `?q=&status=&page=&pageSize=` server-side pagination.
+    62→- Mutations call `logAudit()` + `createNotification()` where meaningful.
+    63→- zod validates every write. Business errors → 400 with human message.
+    64→
+    65→## 6. FRONTEND ARCHITECTURE
+    66→- `src/app/page.tsx` → SessionProvider + AppRoot: unauthenticated → LoginView; else AppShell(routes by hash).
+    67→- `src/lib/router.tsx` → `useHashRoute()` returns path e.g. `crm/leads`; `navigate(path)`.
+    68→- `src/lib/nav-config.ts` → sidebar groups filtered by permissions.
+    69→- Shared components: PageHeader, EmptyState, StatusBadge, PriorityBadge, StatCard, DataTable, FormDialog, Timeline, UserSelect, NumberBadge.
+    70→- Every view MUST implement: loading (skeleton), error (retry), empty state with CTA, responsive (cards on mobile), real data only (NO fake data — policy §54).
+    71→
+    72→## 7. WORKFLOWS IMPLEMENTED
+    73→- Lead lifecycle: NEW→CONTACTED→QUALIFIED→MEETING→PROPOSAL_SENT→NEGOTIATION→WON/LOST (kanban DnD persists status + logs Activity).
+    74→- Smart conversion (§62): Lead→WON opens convert dialog: create Client+Contact+Project+Onboarding checklist+notify PM.
+    75→- Proposal→ACCEPTED offers same conversion path.
+    76→- Project completion checklist (§63) → offer Maintenance.
+    77→- Follow-ups: pending/completed/cancelled, overdue computed vs dueAt, dashboard widgets.
+    78→
+    79→## 8. IMPLEMENTATION ROADMAP (phases)
+    80→- ✅ Phase 1 FOUNDATION: schema, auth, roles/permissions, shell, theme, dashboard, settings, audit, notifications, search.
+    81→- ✅ Phase 2 CRM: Leads, Pipeline, Follow-ups, Activities, Clients, Contacts. (Task 3-a)
+    82→- ✅ Phase 3 SALES: Meetings, Proposals, Quotations, Contracts. (Task 3-b)
+    83→- ✅ Phase 4 PROJECTS: Projects, Phases, Tasks, Team workload, Calendar. (Task 3-c)
+    84→- Phase 5 FINANCE: Invoices, Payments, Expenses → cron round.
+    85→- Phase 6 MARKETING: Content, Campaigns, Content Calendar → cron round.
+    86→- Phase 7 SUPPORT: Tickets, Maintenance, Client Portal (separate client view) → cron round.
+    87→- Phase 8 INTELLIGENCE: Reports, Automations engine, Insights, AI assistant, PDF export, File uploads → cron rounds.
+    88→
+    89→## 9. DOCUMENTED ASSUMPTIONS (per §80)
+    90→- Currency default EGP, timezone Africa/Cairo (configurable in Settings).
+    91→- English-first UI; i18n structure ready (next-intl installed) for Arabic/RTL later.
+    92→- Files: metadata table exists; binary storage + secure download API in Phase 5+ round.
+    93→- PDF generation via print-stylesheet route in later round.
+    94→- Client Portal = separate post-login view gated by client identity, Phase 7.
+    95→- No integrations faked (§78). Marketing analytics shows "No data available" until connected.
+    96→
+    97→## 10. WORK LOG
+    98→
+    99→---
+   100→Task ID: 1,2,2b,3-f,3-f2
+   101→Agent: orchestrator (Z.ai Code)
+   102→Task: Architecture, database, foundation libs, shell, dashboard, platform APIs.
+   103→
+   104→Work Log:
+   105→- Wrote full Prisma schema (all Phase 1-8 entities), pushed to SQLite.
+   106→- Seeded roles+permissions matrix, 4 team users, org settings, numbering config.
+   107→- Built NextAuth credentials auth (bcrypt, isActive check, lastLoginAt, audit login).
+   108→- Built permission helper, api-helpers (consistent envelope, zod, pagination), numbering.
+   109→- Built APEX dark-navy theme (globals.css), AppShell (sidebar+topbar+search+notifications), hash router, nav config, login screen.
+   110→- Built Dashboard command center (real stats) + platform APIs.
+   111→- Created view stubs for all modules; dispatched module agents.
+   112→
+   113→Stage Summary:
+   114→- Foundation + CRM + Sales + Projects delivered in session; Finance/Marketing/Support/Reports/KB/ClientPortal/Automations/AI continue via webDevReview cron every 15 min.
+   115→
+   116→---
+   117→Task ID: 3-a
+   118→Agent: CRM module agent
+   119→Task: CRM Module — Leads, Pipeline, Follow-ups, Clients, Contacts
+   120→
+   121→Work Log:
+   122→- Read master handover, schema (Lead/FollowUp/Client/Contact/Activity), api-helpers, api-client, numbering, shared components, conversions API and dashboard style references.
+   123→- Found the CRM views + APIs already drafted by an interrupted earlier run of this task; audited every file line-by-line against the task spec, fixed gaps and verified end-to-end instead of rewriting from scratch.
+   124→- Fixed route-file hygiene: route.ts modules may only export HTTP handlers — removed `export const` value lists from leads/followups/clients route files and inlined the constants in the matching [id] routes (would have failed `next build` export validation).
+   125→- Verified APIs with real authenticated E2E runs (curl + NextAuth credentials session, admin/sales/pm): lead create → status moves → lost-reason rule → detail timeline → soft/hard delete; follow-up create/complete (completedAt)/list/delete; conversion → client + primary contact; client list/detail/archive/restore; contact create/primary-swap-in-transaction/update/delete; pagination, q/status filters, 403 enforcement (PM cannot create leads, SALES cannot view team).
+   126→- Fixed 2 platform-blocking bugs found during verification (shared files, minimal + commented):
+   127→  1. src/lib/api-helpers.ts — requireAuth() returned the raw session instead of `{ session }`, so EVERY authenticated API call (all modules) crashed with "Cannot read properties of undefined (reading 'user')". Now returns `{ session } as AuthContext` matching the AuthContext contract all call sites already use.
+   128→  2. src/app/api/conversions/route.ts — nextNumber() was called INSIDE the interactive transaction; nextNumber writes via the global Prisma client, which self-deadlocks on SQLite (single-writer lock → 5s engine socket timeout) making every conversion 500. Document numbers are now pre-computed before the tx opens (tx timeout also raised to 30s).
+   129→- Cleaned all E2E test data afterwards (DB back to 0 leads / 0 clients; numbering counters advanced — harmless skip).
+   130→- `bun run lint` clean; dev.log clean; GET / returns 200 with the full SPA (registry compiles all 4 CRM views + shared lead-detail module).
+   131→
+   132→Stage Summary:
+   133→- API contracts (envelope {success,data}|{success,error}, server-side permissions):
+   134→  - GET/POST /api/leads (leads.view/create) — filters q,status(source, priority, assignedToId incl "UNASSIGNED"), sort key, pagination; auto leadNumber APX-L-YYYY-####; activity "Lead created" + audit CREATE + assignee notification.
+   135→  - GET/PATCH/DELETE /api/leads/[id] (leads.view/edit/delete) — detail includes assignedTo, createdBy, followUps, meetings, proposals, last-50 activities; PATCH side-effects: STATUS_CHANGED activity, assignee notification "Lead assigned: {company}", nextFollowUpAt notification, LOST requires lostReason (400 otherwise), audit STATUS_CHANGE+UPDATE; DELETE = soft, second call hard.
+   136→  - GET/POST /api/followups, PATCH/DELETE /api/followups/[id] (followups.*) — filters status,assignedToId,from,to; COMPLETED sets completedAt; status changes log audit + activity on related lead/client; hard delete.
+   137→  - GET/POST /api/clients, GET/PATCH/DELETE /api/clients/[id] (clients.*) — _count projects/invoices/tickets; detail includes contacts, projects, invoices, tickets, followUps, activities; ARCHIVED sets archivedAt (restore clears); DELETE = archive-only, 409 "Archive instead: client has active projects." when active projects exist.
+   138→  - GET/POST /api/contacts, PATCH/DELETE /api/contacts/[id] (contacts.*) — primary swap in a transaction; activity on parent client.
+   139→- Views (all with skeletons, ErrorState+retry, EmptyState CTA, toasts, permission-gated controls, responsive):
+   140→  - Leads: debounced search + 4 filters + clear, server-paginated table (columns hide on mobile), row actions (Edit/Move to…/Convert/Delete w/ AlertDialog), New Lead dialog with all fields + client-side validation.
+   141→  - Pipeline: 8 status columns with count + budget sums, @dnd-kit drag & drop (PointerSensor 8px, pointerWithin, DragOverlay) with optimistic update + revert + toast, per-card "Move to…" dropdown fallback for touch, summary bar (total/value/conversion %), LOST flow asks reason.
+   142→  - Lead detail drawer (Sheet 520px, Overview/Timeline/Follow-ups) shared by Leads + Pipeline via src/views/crm/lead-detail.tsx (same-folder module; exports LeadDetailDrawer, LeadFormDialog, ConvertLeadDialog, LostReasonDialog, ActivityTimeline, useTeam hook); convert dialog prefills client/contact/project and POSTs /api/conversions, then navigates to crm/clients; team select hides when /api/team 403s.
+   143→  - Follow-ups: Today/Upcoming/Overdue/Completed tabs computed client-side from dueAt+status, checkbox complete, related entity chip navigates, per-tab empty states.
+   144→  - Clients: card grid with counts chips, search+status filter, detail drawer (Overview with inline contacts CRUD / Projects → navigate("projects") / History timeline), archive + restore.
+   145→- Decisions: kept the shared CRM components module lead-detail.tsx inside src/views/crm (same-folder locality per spec, avoids a 1500-line leads.tsx); value lists duplicated between route files instead of cross-importing route modules.
+   146→- Observations for orchestrator: seeded ADMIN role lacks `dashboard.view` (dashboard returns 403 for admin/sales/pm/dev — needs re-seed or role fix, outside my scope); conversion route fix noted above; numbering counters advanced by ~5 during E2E tests.
+   147→
+   148→---
+   149→Task ID: 3-b
+   150→Agent: Sales module agent
+   151→Task: Sales Module — Meetings, Proposals, Quotations, Contracts
+   152→
+   153→Work Log:
+   154→- Read master handover, schema (Meeting/Proposal(+Item)/Quotation(+Item)/Contract), permissions, api-helpers (fixed requireAuth contract from 3-a), api-client, numbering, conversions API, shared components and dashboard style refs.
+   155→- Found the 4 sales views + 8 API routes already drafted by an interrupted earlier run of this task (same situation as 3-a); audited every file line-by-line against the task spec instead of blind-rewriting, then fixed the gaps and verified end-to-end.
+   156→- API fixes:
+   157→  1. contracts/[id] PATCH — signing was silent. Added notifyRole("SUPER_ADMIN") + notifyRole("ADMIN") with type CONTRACT_SIGNED, title "Contract signed", per spec.
+   158→  2. proposals/[id] PATCH — aligned SENT notifications to spec: title is now "Proposal sent: {number}" (body "{title} — sent by {actor}") for SUPER_ADMIN, ADMIN and SALES roles.
+   159→- View fixes:
+   160→  3. meetings.tsx — spec requires TABS Today/Upcoming/Past; the draft rendered grouped sections with one global empty state. Rebuilt as real Tabs with count badges, per-tab empty states (TabEmpty: filtered vs today/upcoming/past variants with New Meeting CTA), a shared MeetingRowItem row component (title, date+time range, clickable lead/client/project chips navigating to crm/leads, crm/clients, projects, map-pin location, meetingLink opens new tab, outcome/next-action line when completed, per-row status dropdown honoring the server transition map), plus a one-time auto-select of the first non-empty tab after initial load.
+   161→  4. proposals.tsx — fixed ConvertDialog layout bug (the "already linked to a client" note was a third flex child squeezed beside the Switch; moved below the card) and simplified the project-Switch disabled logic to `!form.createClient` (mirrors the conversions API rule "a project requires creating a client"). Added an amber hint on ACCEPTED proposals without a linked client explaining the conversion happens at the accept step (see decisions below).
+   162→- Verified all 8 routes only export HTTP handlers (no export const — build validation), Next.js 16 async `params` everywhere, nextNumber() called OUTSIDE every transaction (3-a deadlock rule), totals computed server-side only (client totals are display preview mirroring the formula).
+   163→- E2E with real authenticated sessions (curl + NextAuth credentials) as admin/sales/pm/dev:
+   164→  - Meetings: create (validates endTime>startTime, dangling FKs rejected), list with q/status/from/to + pagination, SCHEDULED→COMPLETED with outcome+nextAction, invalid transition 409, DELETE + audit, meeting activities appear on the lead timeline.
+   165→  - Proposals: builder create → APX-P-2026-0001, subtotal=100000, total=109000 (100000−5000+14%) exact; detail + items + activities; PATCH items replace recompute (60000/68400); DRAFT→SENT sets sentAt + 3 role notifications; SENT→DRAFT 409; DELETE non-draft 409 "Only draft proposals can be deleted."; SENT→VIEWED sets respondedAt; POST /api/conversions with proposalId → client APX-CLT-2026-0005 + project APX-PRJ-2026-0001 + proposal flips ACCEPTED with clientId linked.
+   166→  - Quotations: APX-Q-2026-0001 (30000 → 34200 with 14% tax), SENT transition, activities, empty-items draft, draft delete, non-draft delete 409.
+   167→  - Contracts: APX-C-2026-0001 with client+proposal link, full DRAFT→SENT→SIGNED (signedDate stamped)→ACTIVE→COMPLETED lifecycle, invalid transition 409, terms LOCKED after signature 409, DELETE non-draft 409, clientId+status filters, "Contract signed" activity on contract + client timelines, SUPER_ADMIN/ADMIN notifications.
+   168→  - Permissions: PM can meetings.* but 403 on proposals.create/contracts.edit/quotations.delete (view-only for proposals/quotations/contracts); SALES full sales CRUD; DEVELOPER 403 meetings.view/contracts.view; unauthenticated 401.
+   169→- Cleaned all E2E test data afterwards (DB back to 0 leads/clients/proposals/quotations/contracts/projects/meetings/contacts; numbering counters advanced to 0001-0005 — harmless skip per 3-a precedent).
+   170→- `bun run lint` clean; dev.log shows no compile errors from my files; GET / compiles the full SPA (all 4 sales views registered).
+   171→
+   172→Stage Summary:
+   173→- API contracts (envelope {success,data}|{success,error}, server-side permissions):
+   174→  - GET/POST /api/meetings (meetings.view/create) — filters q, status, from, to + pagination; include lead/client/project {id, companyName|name}; POST requires title/date/startTime/endTime (HH:MM, end>start), validates links exist, status SCHEDULED; audit CREATE + "Meeting scheduled" activity on linked lead/client.
+   175→  - PATCH/DELETE /api/meetings/[id] (meetings.edit/delete) — transitions SCHEDULED→COMPLETED/CANCELLED/RESCHEDULED, RESCHEDULED→SCHEDULED/COMPLETED/CANCELLED, CANCELLED→SCHEDULED, COMPLETED terminal (409 INVALID_TRANSITION otherwise); status changes log audit STATUS_CHANGE + activity on lead/client (outcome included when completed); hard delete + audit.
+   176→  - GET/POST /api/proposals (proposals.view/create) — filters status/q; POST: title required, items[{description, quantity>0, unitPrice>=0}], server computes subtotal=Σqty*price, total=subtotal−discount+subtotal*tax%/100, proposalNumber=nextNumber("proposal") OUTSIDE tx, create+items in ONE transaction, audit+activity.
+   177→  - GET/PATCH/DELETE /api/proposals/[id] (proposals.view/edit/delete) — detail includes items, lead/client contact info, last-50 activities (entityType=PROPOSAL); PATCH replaces items in tx + always recomputes totals; transitions DRAFT→SENT (sentAt=now, notifyRole SUPER_ADMIN+ADMIN+SALES "Proposal sent: {number}"), SENT→VIEWED/ACCEPTED/REJECTED/EXPIRED (respondedAt), ACCEPTED/REJECTED locked from edits; DELETE only DRAFT (409 otherwise).
+   178→  - GET/POST /api/quotations + [id] (quotations.*) — same pattern, nextNumber("quotation"), statuses DRAFT/SENT/ACCEPTED/REJECTED/EXPIRED, SENT notifies the 3 roles, draft-only delete.
+   179→  - GET/POST /api/contracts + [id] (contracts.*) — filters status/clientId/q; include client/project/proposal; POST requires clientId+title, contractNumber=nextNumber("contract"), audit + activity on contract + client; PATCH flow DRAFT→SENT→SIGNED (signedDate=now, activity "Contract signed", notifyRole SUPER_ADMIN+ADMIN)→ACTIVE (auto startDate)→COMPLETED/CANCELLED; terms locked after signature (projectId/proposalId/notes stay editable); DELETE only DRAFT.
+   180→- Views (all with ListSkeleton, ErrorState+retry, per-tab/per-filter EmptyState CTA, toasts, permission-gated controls, responsive hidden-md columns, debounced 300ms search, scrollable dialogs/sheets):
+   181→  - Meetings: Today/Upcoming/Past tabs with counts + per-tab empty states, entity chips navigate to CRM/projects, join-link opens new tab, status dropdown per row, complete-with-outcome dialog, create/edit dialog with lead/client/project selects that degrade to free text on 403 (GET /api/leads|clients|projects?pageSize=100).
+   182→  - Proposals: table (#, title, lead/client, total, status, sent, valid-until red when past & active), full builder dialog (problem/solution/scope, deliverables as newline/comma array, timeline, validUntil, currency EGP/USD/SAR, discount, tax%, payment/revision/maintenance/terms/notes) with items editor (qty step 0.5, price step 0.01, line totals, add/remove, live subtotal+tax+total preview mirroring server formula), detail Sheet with status stepper Draft→Sent→Viewed→Accepted/Rejected/Expired + per-permission actions, items table, financials, Activities tab.
+   183→  - Quotations: compact table + builder dialog with items editor + totals + validUntil, detail sheet with stepper and status actions.
+   184→  - Contracts: table (#, title, client, project, status, start, end, signed), create/edit dialog (client select required — warns when clients.view missing; project/proposal optional, proposals filtered to ACCEPTED; scope/deliverables/timeline/payment/revision/maintenance textareas; dates), detail sheet with all terms, document link, history, status action buttons.
+   185→- Conversion integration: proposal detail "Accept" opens the Convert-to-Client-and-Project dialog (prefilled from the linked lead: company/email/phone/contact name; optional project with type + PM select from /api/team degrading silently on 403 + notify-PM switch) → POST /api/conversions {proposalId, options} → toast with client/project numbers → navigate("crm/clients"). Server marks the proposal ACCEPTED inside the same conversion call. Limitation (inherited, conversions route owned by 3-a/foundation and 409-guarded): a proposal marked accepted WITHOUT converting (the dialog's "Mark accepted only") cannot be converted afterwards — the sheet shows an explanatory amber hint instead of a dead button.
+   186→- Decisions: kept the drafts' proven structure and patched gaps (faster, lower regression risk than rewriting ~3000 lines); value lists/transition maps duplicated per route file (route modules may not export values); client-side totals labeled as preview only — server is the source of truth.
+   187→- Observations for orchestrator: PRE-EXISTING platform bug outside my scope — GET /api/dashboard returns 500 because dashboard/route.ts includes `{ actor: ... }` on Activity but the schema has no actor relation on the polymorphic Activity model (actorId/actorName are plain strings); dashboard is broken for every role until fixed. Also ADMIN/SALES/PM roles lack dashboard.view (noted by 3-a).
+   188→
+   189→---
+   190→Task ID: 3-c
+   191→Agent: Delivery module agent
+   192→Task: Projects, Phases, Tasks, Team, Calendar
+   193→
+   194→Work Log:
+   195→- Read master handover, schema (Project/ProjectMember/ProjectPhase/Task/TaskComment/TaskChecklistItem), permissions, api-helpers, api-client, numbering, team/meetings/followups/clients/settings APIs, dashboard + CRM style references.
+   196→- Same situation as 3-a/3-b: the 4 delivery views + 8 API routes already existed from an interrupted earlier run. Audited every file line-by-line against the task spec instead of blind-rewriting, fixed the bugs found, then verified the whole module end-to-end with real authenticated sessions (curl + NextAuth credentials, admin + dev).
+   197→- API fixes (all would have been runtime failures):
+   198→  1. GET/POST /api/projects serialized the raw Prisma `_count` while the view consumed `phasesCount`/`membersCount` → every project card rendered "undefined phases · undefined members". Now both endpoints emit explicit `phasesCount`/`membersCount` (and `_count` is stripped from the payload).
+   199→  2. GET /api/projects/[id] ordered members by `createdAt` — ProjectMember has no createdAt column → Prisma validation error → 500 on EVERY project detail open. Changed to `orderBy: { id: "asc" }` (cuid ids are time-ordered ≈ join order).
+   200→  3. PATCH /api/tasks/[id] (and GET detail) ordered checklist items by `createdAt` — TaskChecklistItem has no createdAt → 500 on every task status change. Changed to `orderBy: [{ order: "asc" }, { id: "asc" }]`.
+   201→  4. GET /api/projects/[id] included `{ actor: ... }` on Activity — the RUNNING dev server's Prisma client predates the schema's Activity.actor relation → 500 (same root cause as the dashboard 500 reported by 3-b). Replaced with the proven leads/[id] pattern: plain query on actorId/actorName + one extra `db.user.findMany({ id in actorIds })` to resolve real avatar colors. (Orchestrator note: schema.prisma HAS the actor relation; `bunx prisma generate` regenerates the client but the long-running dev server keeps the old module — a dev-server restart after regenerate fixes dashboard + activities routes too.)
+   202→  5. Removed unused import (calendar) and unused prop (NewProjectDialog navigate).
+   203→- E2E verified (real data, all cleaned afterwards — DB back to 0 projects/clients/tasks; numbering counters advanced to APX-PRJ-2026-0002, harmless skip per precedent):
+   204→  - Projects: create (ECOMMERCE → 9 phases ordered, onboarding checklist 10 items from Settings, manager+creator auto-joined, APX-PRJ-2026-0002), invalid client 400, list filters q/status + pagination envelope, detail shape (client/manager/members with roles/phases with task counts/taskStats/invoices gated by invoices.view/checklists/activities with actor colors), status transitions PLANNING→ACTIVE→CANCELLED→(ON_HOLD 400 INVALID_TRANSITION)→ACTIVE, health patches, checklist array toggles, manual progress 42 then recomputeProgress→0, members add (notification "Added to project …" delivered to dev) / duplicate 409 / unknown user 400 / remove, DELETE = archive; guard 409 "project still has 4 active tasks" with open tasks; archived project 404 + excluded from list.
+   205→  - Tasks: create with phase+project validation, labels normalize, position max+1 within status, assignee notification "New task assigned: …", PATCH →DONE stamps completedAt + project progress 20% (1/5) + "Task status changed" activity on project, reopen clears completedAt + progress recomputed to 0, priority/dueDate/estimatedHours/actualHours/labels edits, assignee change → notification + activity, comments (author join, assignee notification, count), checklist item create (order seq)/toggle/rename/delete, filters status/q/dueFrom/dueTo/view=my, soft delete excluded from lists + 404 on direct GET.
+   206→  - Permissions (DEVELOPER): 403 projects.create/projects.delete/team.view/settings.manage/tasks.delete; 403 with explicit message when assigning to others (POST + PATCH) without tasks.assign; CAN tasks.create (self/leave unassigned), tasks.edit own task, projects.view, tasks.view view=my. Unauthenticated → 401.
+   207→- `bun run lint` clean; dev.log shows no compile errors from my files; GET / 200 (registry compiles all 4 delivery views).
+   208→
+   209→Stage Summary:
+   210→- API contracts (envelope {success,data}|{success,error}, server-side permissions, nextNumber called OUTSIDE transactions):
+   211→  - GET/POST /api/projects (projects.view/create) — filters q, status, clientId, managerId + pagination; items include client{id,companyName}, manager{id,name,avatarColor}, phasesCount, membersCount, totalTasks/doneTasks (soft-deleted tasks excluded, archivedAt null filter); POST: name+clientId required, projectNumber=nextNumber("project"), phases created from Setting "projects".types[key].phases (hardcoded 10-type fallback), status PLANNING/health ON_TRACK, onboardingChecklist seeded from Setting "onboardingChecklist", manager joins as MANAGER + creator as MEMBER; audit CREATE + activity "Project created".
+   212→  - GET/PATCH/DELETE /api/projects/[id] — detail: client, manager, members(user), phases(ordered, with per-phase tasks+doneCount), taskStats{byStatus,total,done,open}, invoices (only with invoices.view, else null), onboarding/completionChecklists parsed, last-30 activities with actor name+color; PATCH: guarded transitions PLANNING→ACTIVE/CANCELLED, ACTIVE/ON_HOLD/REVIEW full set, COMPLETED→ACTIVE, CANCELLED→PLANNING/ACTIVE (400 INVALID_TRANSITION otherwise, audit STATUS_CHANGE + activity "Project status changed"), →COMPLETED initializes completionChecklist from Setting "completionChecklist" when empty, health/progress (explicit or recomputeProgress:true → done/total*100), whole-array checklist PATCH; DELETE = soft archive, 409 PROJECT_HAS_ACTIVE_TASKS when open tasks exist.
+   213→  - POST/DELETE /api/projects/[id]/members (projects.assign) — ?userId= for delete; 409 ALREADY_MEMBER, 400 inactive/unknown user; notification "Added to project {name}"; activity + audit.
+   214→  - GET/POST /api/tasks (tasks.view/create) — filters projectId, phaseId, assigneeId, status, priority, q, dueFrom/dueTo, view=my (session user), order position asc + createdAt desc; serialize includes project/phase/assignee + checklistDone/Total + commentsCount; POST: phase must belong to project, assigning others requires tasks.assign (403 otherwise), position = max+1 within target status, labels comma-string or array → JSON, notification "New task assigned: {title}" to assignee (not self), activity "Task created: …" on project + audit.
+   215→  - GET/PATCH/DELETE /api/tasks/[id] — detail includes reporter + full checklist; PATCH: status (→DONE sets completedAt, leave clears), priority, assignee (self always; others need tasks.assign → notification "Task assigned to you"), dueDate, estimated/actualHours, labels, position; status/assignee change → activity on project + project progress recomputed (done/total); audit UPDATE; DELETE = soft delete + activity + progress recompute + audit.
+   216→  - GET/POST /api/tasks/[id]/comments (tasks.view) — author = session user, author join; POST notifies assignee when actor ≠ assignee.
+   217→  - POST /api/tasks/[id]/checklist (tasks.edit) {text}; PATCH/DELETE /api/tasks/[id]/checklist/[itemId] {isDone?, text?} — 404 when item not under task.
+   218→- Views (all: skeletons, ErrorState+retry, EmptyState CTA, toasts w/ API messages, optimistic updates with revert, permission-gated controls, mobile-first responsive, English UI, named lucide imports, no any):
+   219→  - projects.tsx: header mini-stats (Active/On track/At risk/Delayed from fetched page), search + status filter, card grid (projectNumber, StatusBadge, PriorityBadge, health dot badge, progress bar, "12/20 done" counts, deadline red when <7 days & not completed, manager avatar), New Project dialog (clients via /api/clients?pageSize=100 with manual-ID fallback on 403, types via /api/settings with hardcoded 10-type fallback, manager via /api/team, budget/dates/priority/description), detail Sheet 560px with Overview (inline status/health selects, progress + recompute, archive w/ AlertDialog) / Phases & Tasks (per-phase quick-add task, task rows open TaskDetailSheet) / Members (add+remove, roles) / Checklists (optimistic whole-array PATCH + %) / Activity (actor initials, relativeTime).
+   220→  - tasks.tsx exports TaskDetailSheet + UserAvatar for reuse: Kanban|List|My Tasks tabs. Kanban: 6 columns horizontal-scroll, @dnd-kit/core PointerSensor(8px) + useDraggable/useDroppable + DragOverlay, optimistic status move with revert + toast, per-card "Move to…" dropdown fallback (touch), card shows title/priority/project chip/assignee avatar/due (red overdue)/checklist n/m; List: filter panel (project, assignee, status, priority, due range) + search + server pagination; My Tasks: Overdue/Today/Upcoming/No date groups, complete checkbox → PATCH DONE; New Task dialog (project → phase select loads after project chosen, assignee self-always/others when team list fetched, labels comma-separated); TaskDetailSheet: Overview (inline-editable title/description/status/priority/assignee/due/hours/labels per permission, "Assign to me" fallback when team list unavailable) / Checklist (optimistic add/toggle/remove) / Comments; project chip navigates to projects.
+   221→  - team.tsx: GET /api/team cards (avatar, title, role badges, workload badge AVAILABLE/NORMAL/BUSY/OVERLOADED, openTasks/overdueTasks/activeProjects tiles, skills chips, last login relative time, workload Progress openTasks/10), header summary chips (members, open tasks, busy, overloaded).
+   222→  - calendar.tsx: date-fns month grid (Sunday start), parallel Promise.allSettled over meetings + followups (from/to month bounds) + tasks (dueFrom/dueTo) + projects (deadlines) with per-source 403 degradation (legend shows unavailable sources), day cells ≤3 letter chips (M meeting sky / F follow-up amber / T task violet / D deadline rose) + "+N more", today highlight, day side panel with items + navigate links, Prev/Today/Next, mobile min-w grid with horizontal scroll, month empty state.
+   223→- DnD approach: @dnd-kit/core drag between status columns (pointerWithin default, 8px activation, DragOverlay preview) with per-card dropdown fallback; optimistic setTasks + PATCH + server payload merge, revert to previous array + destructive toast on failure.
+   224→- Limitations/TODO for orchestrator: running dev server holds a pre-actor-relation Prisma client — GET /api/dashboard and GET /api/activities still 500 until `bunx prisma generate` (already run) is followed by a dev-server restart; projects grid is client-filtered over a single pageSize=100 fetch (fine at team scale; server pagination exists on the API); kanban + my-tasks fetch caps at 100 items; numbering counters advanced by tests.
+   225→
+   226→---
+   227→Task ID: 4
+   228→Agent: orchestrator (Z.ai Code)
+   229→Task: Integration verification + browser E2E QA + bug fixes
+   230→
+   231→Work Log:
+   232→- Restarted dev server to load fresh Prisma client (Activity.actor relation) — fixed /api/dashboard + /api/activities 500s.
+   233→- Fixed /api/dashboard: used relation name `assignedTasks` (was invalid `tasks`).
+   234→- Added `dashboard.view` + `notifications.view` to ALL_PERMISSIONS and re-seeded roles (flagged by 3-a).
+   235→- Browser E2E (agent-browser): login flow (admin@apex.system) ✓, sidebar permission-filtered nav ✓, dashboard renders all widgets with real empty states ✓.
+   236→- Created lead via UI (APX-L-2026-0003) ✓; pipeline shows card with Move-to fallback + DnD ✓.
+   237→- Smart conversion §62 tested via API: lead → client APX-CLT-2026-0008 + project APX-PRJ-2026-0004 ✓.
+   238→- Fixed /api/conversions: now generates ProjectPhases from type template (was creating phase-less projects).
+   239→- Fixed projects view: empty client list no longer triggers "unavailable" fallback (only 403 does); added helpful hint.
+   240→- Mobile check (390x844): hamburger drawer, responsive cards, tasks kanban tabs (Kanban/List/My Tasks) ✓.
+   241→- Calendar + Proposals + Contracts + Quotations views render with correct empty states ✓.
+   242→- Screenshots saved under /home/z/my-project/qa/ (01–10).
+   243→
+   244→Stage Summary:
+   245→- Phases 1–4 (Foundation, CRM, Sales, Delivery) are LIVE and browser-verified. Lint clean, dev.log clean, no console errors.
+   246→- Remaining: Phase 5 Finance, Phase 6 Marketing, Phase 7 Support/ClientPortal, Phase 8 Reports/KB/Audit view/Settings UI/Automations — continue via webDevReview cron.
+   247→
+   248→---
+   249→Task ID: CRON-1
+   250→Agent: autonomous dev round (webDevReview, every 15 min)
+   251→Task: Status assessment + QA + Phase 5 FINANCE (Invoices, Payments, Expenses) + dashboard finance widgets
+   252→
+   253→Work Log:
+   254→- Assessed state: Phases 1–4 stable, server 200, lint clean, no new runtime errors (the 2 historical 500s in dev.log predate the Task-4 restart).
+   255→- Built Phase 5 FINANCE backend:
+   256→  • GET/POST /api/invoices — server-computed totals (subtotal/total rounded to 2dp), APX-INV numbering via nextNumber (outside tx), filters q/status/clientId + pagination, summary aggregates; OVERDUE is computed (dueDate < now && status ∈ SENT/PARTIALLY_PAID), never stored.
+   257→  • GET/PATCH/DELETE /api/invoices/[id] — detail + items + payments + 30 activities; guarded transitions (DRAFT→SENT/CANCELLED, SENT→CANCELLED only when paidAmount=0, 400 INVALID_TRANSITION otherwise); items/money LOCKED once sent (§61) with clear 400 LOCKED message; DELETE draft-only; audit STATUS_CHANGE/FINANCE_ACTION; notifications to SUPER_ADMIN+ADMIN on send.
+   258→  • GET/POST /api/payments — overpayment guard (400 OVERPAYMENT with remaining amount), DRAFT/CANCELLED invoices rejected; payment + invoice recalc (paidAmount=Σ payments; PAID when fully covered, PARTIALLY_PAID partial) in ONE transaction; activity on INVOICE + audit + role notifications; filters invoiceId/clientId/method/date-range/q.
+   259→  • GET/POST /api/expenses, PATCH/DELETE /api/expenses/[id] — category filters + byCategory summary, audit FINANCE_ACTION.
+   260→- Built Phase 5 views (src/views/finance/{invoices,payments,expenses}.tsx, registered in registry.tsx):
+   261→  • Invoices: finance summary strip (invoiced/collected/outstanding), status filter incl. Overdue + Unpaid groups, table with due-date red highlighting + paid-progress bars, New Invoice dialog with live items editor + totals, detail Sheet (money box, Send/Cancel/Delete actions with AlertDialog §70, Items/Payments/History tabs), Record payment dialog (prefills remaining).
+   262→  • Payments: collected summaries, method badges (color-coded per method), method+date-range filters, Record Payment flow with open-invoice picker (only sent invoices with remaining > 0).
+   263→  • Expenses: category summary cards, CRUD with AlertDialog, category color badges.
+   264→- Dashboard enhancements (styling+feature mandate): added "Recent payments" widget (top 4 with relative time), overdue-invoices chip, expenses-this-month chip; /api/dashboard extended with finance payload (recentPayments, expensesThisMonth, overdueInvoices).
+   265→- Fixed bugs found during QA:
+   266→  • Radix Select crash: SelectItem with value="" throws "must have a value" — patched all three finance views to use "ALL" sentinel (invoices status, payments method, expenses category).
+   267→  • Floating-point money (48450.00000000001) — computeTotals + paidAmount recalc now round to 2 decimals.
+   268→- E2E verified (browser session): created APX-INV-2026-0001 (items UI/UX 15000 + 80h×350 dev → subtotal 43000, −500 discount, +14% tax = 48450 exact) → SENT → partial payment 20000 INSTAPAY → PARTIALLY_PAID → overpayment attempt correctly 400 OVERPAYMENT → paid remaining → PAID 100%, remaining 0; detail sheet renders items/payments/history; expenses view + empty states OK; dashboard finance widgets render real data. Screenshots qa/11, qa/12.
+   269→- Kept the invoice + client "Nile Digital Agency" + project as realistic QA records (full audit chain) — user can archive/delete from UI.
+   270→
+   271→Stage Summary:
+   272→- Phase 5 FINANCE is LIVE and browser-verified. Lint clean, server 200, no runtime errors.
+   273→- Remaining roadmap: Phase 6 MARKETING (content/campaigns + content calendar) → next round; then Phase 7 SUPPORT (tickets/maintenance/client portal) → Phase 8 (reports, KB, audit view, settings UI, automations).
+   274→- Known minor: invoice paidAmount recorded pre-rounding shows long decimals internally (display formats fine); QA numbering counters advanced to APX-INV-2026-0001 (expected).
+   275→
+   276→---
+   277→Task ID: CRON-2
+   278→Agent: autonomous dev round (webDevReview, every 15 min)
+   279→Task: Status assessment + browser QA + Phase 6 MARKETING (Content pipeline/calendar, Campaigns) + bug fixes
+   280→
+   281→Work Log:
+   282→- Assessed state: Phases 1-5 stable, lint clean, no runtime errors; dashboard QA screenshots (qa/13-14).
+   283→- Fixed floating-point leak (found in QA): "Payment 28450.000000000007 EGP received" — payments POST schema now rounds amount to 2dp up-front (zod transform) and activity/notification text uses toFixed(2); historical DB activity record cleaned via one-off tsx script (now "Payment 28450 EGP received").
+   284→- Built Phase 6 MARKETING backend:
+   285→  • GET/POST /api/content — filters status/platform/contentType/campaignId/authorId/date-range/q + pagination, summary (byStatus, upcomingScheduled, publishedThisMonth); tolerant from/to parsing (accepts YYYY-MM-DD AND full ISO — bug found via calendar 500 "Invalid value for argument lte"); audit CREATE/MARKETING_ACTION + activity + author-assignment notification.
+   286→  • GET/PATCH/DELETE /api/content/[id] — detail + 30 activities; PATCH tracks status transitions (activity + audit STATUS_CHANGE) and enforces "SCHEDULED requires publishDate" (400 PUBLISH_DATE_REQUIRED); notifies newly assigned author.
+   287→  • GET/POST /api/campaigns — q/status filters + byStatus summary + totalBudget; end-date>=start-date validation; budget rounded 2dp.
+   288→  • GET/PATCH/DELETE /api/campaigns/[id] — detail returns { campaign, contents[], activities } (reshaped — original nested shape crashed the view, caught by dev overlay); delete keeps linked content (SetNull) and reports unlinked count.
+   289→- Built Phase 6 views (registered in registry.tsx, nav already existed):
+   290→  • content.tsx — Pipeline|Calendar tabs; summary strip (ideas&drafts / review+approved / scheduled ahead / published this month); table with platform badges (brand colors + icons), author avatar, quick-advance status button (IDEA→DRAFT→REVIEW→APPROVED→SCHEDULED→PUBLISHED→ARCHIVED); full create/edit dialog (title/platform/type/status/publishDate/campaign/author/reviewer/cta/hashtags/caption/mediaUrl); detail sheet with workflow actions + history timeline; mobile card layout.
+   291→  • Publishing calendar — month grid (Sun-Sat), prev/next/Today, fetches per-month server-side (pageSize 200, status-colored chips), today highlight, "+N more" overflow, legend.
+   292→  • campaigns.tsx — summary cards (active/total budget/completed/all), campaign cards grid with lifetime progress bar, create/edit dialog (objective/audience/platform/budget/dates/notes), detail sheet with quick-status buttons + linked content list + history, delete confirm mentions unlinked content count.
+   293→- Prisma: added missing Content.author/reviewer relations (named ContentAuthor/ContentReviewer) + User back-relations + indexes on authorId/campaignId; db:push applied.
+   294→- Dashboard: added "Marketing pulse" widget (published this month / scheduled ahead / live campaigns) + /api/dashboard marketing payload.
+   295→- Permission hardening (§42): dashboard Revenue & Outstanding stat cards now gated by payments.view / invoices.view; Recent payments widget by payments.view; Marketing pulse by content.view. Verified: dev@apex.system sees none of them; admin sees all.
+   296→- Fixed Radix a11y console errors caught by dev overlay: SheetContent requires SheetTitle even in loading state — both content and campaign detail sheets now always render the title header, skeleton only for body.
+   297→- E2E verified (browser, admin session): campaign "APEX Q4 Web Dev Push" created (15,000 EGP budget, toast + summary updated) → content "5 signs your business needs a custom CRM" created → IDEA→DRAFT quick-advance (next shows REVIEW) → publish date set 05 Oct 2026 18:00 via edit dialog → calendar shows the item on Oct 5 (month navigation works) → content detail sheet (caption/CTA/hashtags/history) → campaign detail sheet (quick status, linked content, history) → mobile 390px renders stacked cards + hamburger. Screenshots qa/15-35.
+   298→- Environment notes: dev server killed for Prisma client reload — restarted via detached subshell `(setsid bun run dev &)`; plain nohup/node attempts died with the tool shell. If server is down, use that pattern.
+   299→- Kept QA records (campaign + content) as realistic data with full audit chain; deletable from UI.
+   300→
+   301→Stage Summary:
+   302→- Phase 6 MARKETING is LIVE and browser-verified. Lint clean, no 5xx in dev.log, a11y overlay silent after fixes.
+   303→- Full roadmap: Phases 1-6 DONE (Foundation, CRM, Sales, Delivery, Finance, Marketing).
+   304→- Remaining: Phase 7 SUPPORT (tickets + messages with isInternal flag, maintenance plans with included/used hours, Client Portal) → next round; then Phase 8 (Reports view with real aggregates, Knowledge Base, Audit Log view, Settings UI, global activity feed, automation engine groundwork).
+   305→- Minor known items: invoice paidAmount decimals pre-CRON-1-fix only cosmetic; QA numbering counters advanced (APX-INV-2026-0001 exists); Next.js dev-tools overlay badge overlaps tabs at 390px in dev mode only (not part of the app build).
+   306→
+   307→---
+   308→Task ID: CRON-3
+   309→Agent: autonomous dev round (webDevReview, every 15 min)
+   310→Task: Status assessment + browser QA + Phase 7 SUPPORT (Tickets with internal notes, Maintenance with hour tracking) + dashboard support widget
+   311→
+   312→Work Log:
+   313→- Assessed state: Phases 1-6 stable (lint clean, server 200, console clean after reload — the `[error] DialogContent requires DialogTitle` seen pre-reload was stale HMR noise; a scan of all views/components found zero dialogs missing titles). One intentional decision: NO new requirements proposed beyond roadmap because Phase 7 was the agreed next step.
+   314→- Prisma schema additions (db:push applied):
+   315→  • Ticket.deletedAt + MaintenancePlan.deletedAt (soft archive, consistent with §64 archive-first policy)
+   316→  • NEW model MaintenanceLog (planId, hours, note, loggedById/Name, spentOn) + User relation "MaintenanceLogger" + plan.logs — hour logs are now the source of truth for usedHours (recalculated as Σ logs inside one transaction, mirroring payments→invoice recalc)
+   317→- Built Phase 7 backend (all routes: server-side permission, zod validation, audit WHO/WHAT/WHEN, activities with actor colors, notifications):
+   318→  • GET/POST /api/tickets — filters q (subject/number/client), status, priority, category, clientId, projectId, assignment=ALL|MINE|UNASSIGNED + pagination; summary byStatus/unassigned/urgentOpen; ticketNumber via nextNumber("ticket") = APX-T-2026-#### (called OUTSIDE tx); project must belong to chosen client (400 PROJECT_MISMATCH); assigning others requires tickets.assign (403); unassigned ticket → notifyRole("SUPPORT").
+   319→  • GET/PATCH/DELETE /api/tickets/[id] — detail returns { ticket, messages, activities }; INTERNAL NOTES gated: messages where isInternal=true are only returned to users with tickets.edit (§72, portal-ready); guarded status transitions map (OPEN→IN_PROGRESS/WAITING_CLIENT/RESOLVED/CLOSED; RESOLVED→OPEN reopen; CLOSED→OPEN reopen only; else 400 INVALID_TRANSITION), →CLOSED stamps closedAt, reopen clears it; PATCH also priority/category/subject/description/projectId/assignedToId (assign notifications + activities); DELETE = soft archive, never hard-delete.
+   320→  • POST /api/tickets/[id]/messages — body 1-5000, isInternal flag; activity "Reply sent" vs "Internal note added"; audit action REPLY/INTERNAL_NOTE; notifies assignee when actor ≠ assignee; 400 TICKET_CLOSED when closed (must reopen first).
+   321→  • DELETE /api/tickets/[id]/messages/[messageId] — author OR tickets.delete.
+   322→  • GET/POST /api/maintenance — filters q/status/clientId/projectId + pagination; summary activeCount/expiringSoon (endDate ≤30d)/includedHours+usedHours aggregates (limited plans only); plan tier enum BASIC/STANDARD/PREMIUM/CUSTOM; endDate>startDate validation.
+   323→  • GET/PATCH/DELETE /api/maintenance/[id] — detail { plan, logs(50), activities }; PATCH guarded transitions (ACTIVE→EXPIRED/CANCELLED; EXPIRED/CANCELLED→ACTIVE); usedHours intentionally NOT patchable (400 guidance to use hours log — kept out of schema entirely); DELETE = soft archive.
+   324→  • POST /api/maintenance/[id]/hours — maintenance.edit; hours 0<r≤500 rounded 2dp; optional note + spentOn; log + usedHours recalc in ONE transaction; 400 PLAN_INACTIVE on non-active plans; returns overBudget flag when used > included.
+   325→- Built Phase 7 views (registered in registry.tsx, placeholders removed):
+   326→  • support/tickets.tsx — summary strip (Open work / Urgent open / Unassigned / Resolved); filters search+status+priority+assignment; desktop table (ticketNumber mono, client+project, priority+status badges, assignee avatar, message count, "7d open" age chip in rose when ≥7 days and still open) + mobile cards; New/Edit dialog with client→project dependent selects, category/priority/assignee; detail Sheet with quick status transition buttons + Tabs: Conversation (original request box, replies, INTERNAL NOTES in amber with Lock icon + "Internal" chip, delete own message on hover, composer with Internal-note Switch whose placeholder changes to "clients never see this", composer hidden + reopen hint when CLOSED), Details, History.
+   327→  • support/maintenance.tsx — summary strip (Active plans / Expiring 30d / Hours used / consumption % card with Progress); plan cards with tier badge colors (BASIC slate, STANDARD sky, PREMIUM violet, CUSTOM cyan), hours progress bar turning rose with "over budget" when used>included, expiring-soon warning chip; New/Edit dialog (includedHours empty = unlimited); detail Sheet with Tabs: Hours (consumption box with remaining/over-budget warning incl. upsell hint, inline "Log hours" form hours+date+note, log list), Details, History.
+   328→  • Dashboard: new "Support radar" widget (permission-gated by tickets.view): open/urgent/unassigned tiles + recent open tickets list (click→tickets) + "N active maintenance plans" button; /api/dashboard extended with support payload (urgentOpen, unassignedOpen, activePlans, recentTickets).
+   329→- Bug fixes this round:
+   330→  1. CRASH (caught by browser QA): TicketsView threw "Cannot read properties of undefined (reading 'map')" — /api/team returns { team: [...] } not { items }, so setTeam(undefined) → team.map crash on first dialog render. Fixed loadRefs to read `.team` with `|| []` fallbacks (both support views).
+   331→  2. Hardened ALL form state updates in both support views to functional updaters setForm((f) => ({...f, x})) / setHoursForm((h) => ...) — protects against stale-closure races (an intermittent automation-sequence quirk had silently dropped a field during first create; not reproducible after hardening, verified twice).
+   332→- E2E verified (browser, admin session): ticket APX-T-2026-0001 "Checkout page fails on Safari" created via dialog (client→project cascade, category Bug, priority URGENT) → status OPEN→IN_PROGRESS via quick button → reply sent → internal note sent (amber + Internal chip + placeholder change verified) → History tab shows full timeline → RESOLVED→CLOSED → composer guard "reopen it to continue" appears → server-side 400 INVALID_TRANSITION on CLOSED→IN_PROGRESS attempt → reopen works → message-on-reopened works → RESOLVED final state. Maintenance: plan for Nile Digital Agency created (STANDARD, 10h) → 6.5h logged ("3.5h remaining") → 4h more logged → "10.5h used · 0h remaining / Over included hours by 0.5h — consider upselling or renewing" + rose bar → edit to 12h included → card shows 10.5/12h → cancel plan → hours attempt 400 PLAN_INACTIVE → reactivate. Junk QA plans archived; ticket APX-T-2026-0002 created to verify hardened dialog.
+   333→- Permissions verified: dev@apex.system (no tickets.view) sees NO Tickets/Maintenance nav, NO Support radar, and API returns 403 FORBIDDEN; unauthenticated 401; admin 200. Mobile 390px: no horizontal overflow, cards render, screenshots qa/37-43.
+   334→
+   335→Stage Summary:
+   336→- Phase 7 SUPPORT is LIVE and browser-verified (tickets + maintenance + dashboard widget). Lint clean, zero 5xx in dev.log, all APIs 200/201/400/401/403 as designed.
+   337→- DB state: 2 tickets (1 RESOLVED w/ reply+internal note, 1 OPEN feature request), 1 ACTIVE maintenance plan (10.5/12h, 2 logs) — kept as realistic records with full audit chains. Numbering advanced to APX-T-2026-0002.
+   338→- Remaining roadmap: Phase 8 (Reports view with real aggregates, Knowledge Base, Audit Log view, Settings UI org/team/roles/config, global activity feed, automation engine groundwork) — one module per round.
+   339→- Known minor: ticket detail message list relies on tickets.edit for internal notes (by design for portal phase); maintenance includedHours edit allowed after hours logged (recompute % only, no retroactive validation) — acceptable, logs remain source of truth for usedHours.
+   340→
+   341→---
+   342→Task ID: CRON-4
+   343→Agent: autonomous dev round (webDevReview, every 15 min)
+   344→Task: Status assessment + browser QA + Phase 8a INTELLIGENCE (Reports, Audit Log view, global Activity feed) + route permission guard
+   345→
+   346→Work Log:
+   347→- Assessed state: Phases 1-7 stable (lint clean, server 200, login + dashboard verified in browser, console clean); remaining Phase 8 placeholders identified via registry (reports/audit/knowledge/settings).
+   348→- Built /api/reports (GET ?range=30|90|365|all, reports.view): real cross-module aggregates only (§54) — KPIs (newLeads/won/conversionRate/activeClients/invoiced/collected/outstanding/expenses/activeProjects/tasksDone/openTickets/publishedContent), sales funnel (per-status counts + estimated value + open pipeline value), revenue trend (fixed 6-month window invoiced vs collected bucketed in JS from payment/invoice rows), expenses by category, projects by status + health, tasks by status, team leaderboard (range-scoped completions, open + overdue counts, top 8), support (status distribution, avg resolution hours from closedAt-createdAt, urgent/unassigned open), marketing (content by status + platform, campaigns by status with budget), activity totals. EVERY section AND KPI is additionally gated by the caller's own permissions (sections map returned; sales without invoices.view never sees finance internals, dev without leads.view never sees the funnel).
+   349→- Enhanced /api/audit: q (actorName contains), from/to (date-only tolerant parsing, end-of-day inclusive), summary payload (events today, distinct actions + entityTypes for filter dropdowns, top-5 actors by event count); metadata now parsed to JSON objects server-side.
+   350→- Enhanced /api/activities: entityType + q (title/description contains) filters, page/pageSize envelope for Load-more pagination.
+   351→- Built views (registered in registry.tsx; Activity added to Company nav group with activities.view):
+   352→  • company/reports.tsx — range pill selector (30/90/365/All) + refresh + generated-at caption; 10 permission-gated KPI StatCards (money rendered as "48,450" with "(EGP)" in the label to avoid truncation — QA caught "48,450 E..."); section card grid with SectionCard locked state (Lock + "Restricted" + hint), CSS BarList (status-colored bars, funnel values, expenses), 6-month revenue trend grouped bar chart with legend + hover tooltips, delivery health chips, team leaderboard (rank highlight, avatars, done/open/overdue chips), support metrics row (avg resolution/urgent/unassigned), marketing pulse chips, workspace activity totals.
+   353→  • company/audit.tsx — summary strip (matching events / today / top-3 actors with deterministic color dots); filter panel (actor search, action select from distinct list, entity select, from/to dates, reset); desktop table (time + relative, actor avatar, action badge color-coded CREATE/UPDATE/STATUS_CHANGE/DELETE/ARCHIVE/LOGIN/…, entity + cuid, IP) with click-to-expand metadata JSON row; mobile cards; Prev/Next pagination "Showing x–y of z".
+   354→  • company/activity.tsx — global feed (§67): search + entity-type filter (icon-tinted map for 20 entity types), day-grouped timeline (Today/Yesterday/weekday sticky headers), actor avatar + entity icon chip + description + relative time, Load more (30/page appends until total).
+   355→- Security hardening (defense-in-depth): page.tsx now derives REQUIRED_PERMISSIONS from NAV_GROUPS (single source of truth) and renders a "You do not have access to this page" EmptyState instead of any view the user's role lacks — previously a dev typing #/reports saw the view shell with error states; now blocked client-side AND server-side (APIs still 403).
+   356→- E2E verified (browser): admin sees 41 real activity events, 77 audit events (top actors APEX Owner 60 / Sales 8 / Dev 7); Reports renders real data (1 lead won → 100% conversion, 48,450 invoiced/collected, revenue trend Apr–Sep, leaderboard 4 members, support open 1/resolved 1); range switch 30d shows correct "No records" empty states; audit CREATE filter → 18 events + metadata JSON expand (ticketNumber/subject/priority); audit from/to+action → 18 LOGINs; q=Sales → 8 rows all APEX Sales; entityType=TICKET → 10; activity Load more 30→41; activity API entityType/q filters verified server-side. Permissions: dev@ (no reports/audit/activities.view) — nav hides all three, APIs return [403,403,403], direct hash #/reports shows the new NoAccess panel (screenshot qa/47). Mobile 390px: zero horizontal overflow on all three views (qa/48-50).
+   357→- QA screenshots saved qa/44-52. The one historical 500 in dev.log is my own malformed programmatic signout attempt (missing CSRF) — UI signOut works; not an app bug.
+   358→- Lint clean after all changes (ran twice).
+   359→
+   360→Stage Summary:
+   361→- Phase 8a INTELLIGENCE is LIVE and browser-verified: Reports (cross-module, permission-sectioned), Audit Log (full traceability + filters + metadata), Activity feed (global, filterable, day-grouped) + client-side route permission guard.
+   362→- Roadmap remaining: Phase 8b — Knowledge Base (schema exists: KnowledgeArticle model), Settings UI (org/team/roles/config via existing /api/settings + /api/team), automation engine groundwork (Automation model exists); then Client Portal security review.
+   363→- Suggested next-round order: Settings UI (largest UX gap — everything behind it is already built) → Knowledge Base → automations groundwork.
+   364→
+   365→---
+   366→Task ID: CRON-5
+   367→Agent: autonomous dev round (webDevReview, every 15 min)
+   368→Task: Status assessment + browser QA + Phase 8b (Settings UI, Knowledge Base, users/roles APIs) + pre-existing type-error fixes
+   369→
+   370→Work Log:
+   371→- Assessed state: Phases 1-8a stable (lint clean, server 200, no new runtime errors); remaining placeholders: knowledge + settings.
+   372→- Prisma schema: added KnowledgeArticle.deletedAt (archive-first §64) + author relation "KnowledgeAuthor" (was missing — kb routes crashed tsc) + @@index([authorId]); db:push applied.
+   373→- Built backend (all: server-side permission, zod validation, audit WHO/WHAT/WHEN, notifications, Next-16 async params):
+   374→  • GET/POST /api/knowledge (kb.view/create) — filters q/category/authorId + pagination; summary (total, byCategory groupBy, contributors); content ≥10 chars, title ≥3; activity + audit; soft-archive DELETE via [id]; PATCH bumps version ONLY when content actually changed (verified: unchanged save keeps v1, real edit → v2).
+   375→  • GET/PATCH/DELETE /api/knowledge/[id] — 404 on deleted; PATCH enforces category enum (9 KB categories); DELETE = soft archive + audit ARCHIVE.
+   376→  • GET/POST /api/users (team.manage) — full team incl. inactive + role list + avatar palette; POST: bcrypt hash(10), email unique 409, ≥1 role, audit CREATE + PERMISSION_CHANGE (granted roles).
+   377→  • PATCH /api/users/[id] (team.manage) — name/title/color/isActive/roleKeys/newPassword; SELF-GUARDS: cannot deactivate self (SELF_DEACTIVATION), cannot change own roles (SELF_ROLE_CHANGE), cannot reset own password here (SELF_PASSWORD); LAST_SUPER_ADMIN integrity guard (400 when removing/deactivating the last active super admin); role change → audit PERMISSION_CHANGE with granted/revoked + notification "Sign out and back in"; password reset audited WITHOUT logging the password.
+   378→  • GET /api/roles (settings.manage OR permissions.manage) — roles with parsed permissions + userCount + ALL_PERMISSIONS; POST (permissions.manage): custom role, UPPER_SNAKE_CASE key slugified, validates permissions ⊆ ALL_PERMISSIONS, 409 KEY_TAKEN.
+   379→  • PATCH/DELETE /api/roles/[id] (permissions.manage) — permission edit computes granted/revoked diffs, SELF_LOCKOUT guard (cannot strip permissions.manage from a role you hold), affected members notified; DELETE blocked for system roles (SYSTEM_ROLE) and roles in use (ROLE_IN_USE).
+   380→  • /api/search: added Knowledge Base group (kb.view) — verified "onboarding" → SEARCH:Knowledge Base:1.
+   381→- Built views (registered in registry.tsx; placeholders GONE — every module now real):
+   382→  • company/knowledge.tsx — summary strip (articles/categories-in-use/contributor avatars), search + category filter, card grid (category color badge, vN badge, 2-line excerpt, author avatar, relative time), create/edit dialog (title/category/visibility/mono textarea with formatting hints), detail Sheet (always-rendered SheetTitle incl. loading state, category+version+visibility badges, author line, markdown-ish renderer: #/## headings, - bullets, ``` code blocks), edit + archive (AlertDialog) from sheet; pagination; empty-state CTA.
+   383→  • system/settings.tsx — 4 permission-gated tabs (tabs hidden without their permission):
+   384→    - Organization (settings.manage): org profile form (name/product/tagline/email/phone/currency 3-letter/timezone/address) + services ListEditor; dirty-tracking SaveBar (amber "Unsaved changes" + Discard).
+   385→    - Team (team.manage): user cards (avatar, YOU chip, role badges, custom-permissions hint, last-login/joined), search, "N active · M deactivated" chip, Create dialog (password ≥8, role picker, color swatches), Edit dialog (self: roles/password/status disabled with explanations), Deactivate/Reactivate quick action.
+   386→    - Roles & Permissions (permissions.manage): role cards (SYSTEM lock badge, permission/member counts, delete only for custom), create/edit dialog with module-grouped PermissionMatrix (select-all per module, ALL_PERMISSIONS from server), delete AlertDialog.
+   387→    - Workspace Config (settings.manage): Finance defaults (currency/invoice prefix/default tax/payment methods/expense categories), CRM sources, Project types & phase templates (10 type cards + reorderable phase editor with up/down/remove/add), onboarding + completion checklist editors; per-section SaveBar; all persisted via PUT /api/settings.
+   388→- Fixed bugs caught during QA (4):
+   389→  1. KB list didn't auto-refresh after create/archive — reloadKey missing from load useCallback deps → added.
+   390→  2. Radix a11y ERROR "DialogContent requires DialogTitle" from KB sheet loading state (Sheet = Dialog under the hood) → restructured sheet: header with SheetTitle always renders, skeleton only in body.
+   391→  3. ALL_PERMISSIONS contained "notifications.view" TWICE → React duplicate-key console errors in PermissionMatrix + INVALID_PERMISSIONS surprises → deduped permissions.ts + re-seeded roles (SUPER_ADMIN now 87 perms, 0 dupes).
+   392→  4. Fixed 5 PRE-EXISTING tsc errors: projects/[id] + tasks/[id] patch typed ProjectUpdateInput/TaskUpdateInput while assigning scalar FKs → switched to UncheckedUpdateInput; reports closedTickets possibly-null → ?? []; reports.tsx kpi conversionRate sub null math → ?? 0; shared STATUS_STYLES duplicate REVIEW key → removed.
+   393→- E2E verified (browser, admin): KB article "Client onboarding workflow" created via UI (SOP) → renders in sheet with headings/bullets/code block → edit appends "4. Post-kickoff" → v2 + auto-refresh → junk article created → archived → gone. Settings: org phone edit saved (verified in DB via API), Team tab shows 4 members → created support@apex.system (SUPPORT role, toast, 5 active) → login AS support@ WORKS (nav: Dashboard/Clients/Projects/Tickets/Maintenance/KB only + Support radar widget) → deactivated via API → login rejected → reactivated (ACTIVE:true). Roles: 8 system roles with counts → created CONTENT_LEAD (10 perms) → edited (uncheck kb.view → 9) → deleted; SELF_LOCKOUT guard verified via API (400 stripping permissions.manage from own SUPER_ADMIN); role permissions JSON cleaned by re-seed. Config: ETISALAT_CASH added → saved → verified via API → removed → restored (6 methods). Audit trail verified: CREATE/UPDATE/ARCHIVE KNOWLEDGE_ARTICLE, CREATE+PERMISSION_CHANGE USER, CREATE/PERMISSION_CHANGE/DELETE ROLE, UPDATE SETTING all present with actors.
+   394→- Permissions verified: dev@ — Settings/Reports/Audit/Activity nav hidden, #/settings direct → NoAccess panel, APIs [settings,users,roles,knowledge] = [403,403,403,200], KB shows "New article" (kb.create). support@ — scoped nav + dashboard as designed. Mobile 390px: KB + Settings zero horizontal overflow (qa/68-69).
+   395→- Screenshots qa/53-70. Lint clean; tsc clean for app code; 0×5xx in dev.log; console clean.
+   396→
+   397→Stage Summary:
+   398→- Phase 8b is LIVE and browser-verified: Settings (org/team/roles/config), Knowledge Base (full lifecycle + versioning), user management (create/deactivate/reactivate/password reset), role management (custom roles + permission matrix), search integration.
+   399→- ROADMAP COMPLETE: Phases 1-8 all delivered (Foundation, CRM, Sales, Delivery, Finance, Marketing, Support, Intelligence+System). Every placeholder removed — all 22 nav views are real.
+   400→- DB state: +1 KB article (real SOP, v2), +1 team member support@apex.system (Support@2026 — useful for Client Portal phase), org phone set; CONTENT_LEAD role deleted (QA); ETISALAT_CASH config change reverted.
+   401→- Remaining candidates for future rounds (not yet built): Client Portal (customer-facing, §72 security boundary — support@ account ready), automation engine (Automation model exists, automations.manage permission reserved), file upload API (FileRecord model exists), password self-service reset from login screen, i18n dictionary extraction (§30 English-first already enforced).
+   402→- Known minor: dialogs emit "Missing Description" warnings in some AlertDialogs (warnings only, non-blocking); dashboard "Recent activity" shows repeated user-update events during QA (real records, fade as new events arrive).
+   403→
+   404→---
+   405→Task ID: CRON-6
+   406→Agent: autonomous dev round (webDevReview, every 15 min)
+   407→Task: Status assessment + browser QA + Automation Engine (Phase 8 groundwork — the last unbuilt roadmap module)
+   408→
+   409→Work Log:
+   410→- Assessed state: Phases 1-8b stable (lint clean, server 200, all placeholders gone). Chose the Automation Engine as this round's module — the final item from the original Phase 8 roadmap (Automation model + automations.manage permission were reserved since Phase 1).
+   411→- Prisma schema: Automation extended with description, condition (JSON guard), lastRunAt, runCount + @@index([trigger, isActive]); db:push applied.
+   412→- Built engine (src/lib/automations.ts):
+   413→  • 5 triggers: LEAD_CREATED, TICKET_CREATED, INVOICE_SENT, PAYMENT_RECEIVED, PROJECT_COMPLETED — each with a documented field list (labels + samples for previews).
+   414→  • Template rendering {{placeholder}} with typo safety: unknown placeholders rejected at SAVE time (400 UNKNOWN_PLACEHOLDER naming the exact field) and left visible in previews.
+   415→  • Optional conditions: {field, equals} OR {field, in:[...]} (e.g. priority is URGENT / HIGH or URGENT).
+   416→  • Actions allow-list: NOTIFY_ROLE (role → all active members) + NOTIFY_ASSIGNEE (skips when unassigned). NO arbitrary writes — engine can only notify.
+   417→  • runAutomations() is fire-and-forget: wrapped so a failing rule NEVER breaks the business operation that triggered it; per-rule isolation (one bad rule doesn't block others); updates lastRunAt/runCount after each run.
+   418→- Built API (all automations.manage, zod-validated, audited):
+   419→  • GET /api/automations — rules + trigger registry + action types + role list (single payload for the view).
+   420→  • POST /api/automations — create with name-dup check (409), trigger validation, placeholder validation against the chosen trigger's fields.
+   421→  • PATCH /api/automations/[id] — edit/toggle (single-key isActive toggle audited as STATUS_CHANGE).
+   422→  • DELETE — hard delete + audit (run history is transient by design).
+   423→  • POST /api/automations/[id]/test — server-side dry-run: renders actions against sample data, reports conditionMet, sends NOTHING.
+   424→- Wired engine into 5 routes (after commit, non-blocking): leads POST → LEAD_CREATED; tickets POST → TICKET_CREATED; invoices [id] PATCH (DRAFT→SENT) → INVOICE_SENT; payments POST → PAYMENT_RECEIVED (amount/method/invoiceStatus); projects [id] PATCH (→COMPLETED) → PROJECT_COMPLETED.
+   425→- Built view (src/views/system/automations.tsx, nav item in System group next to Settings, registered):
+   426→  • Summary (rules/active/total runs), "How it works" explainer banner, trigger filter pills.
+   427→  • Rule cards: colored trigger icon, condition chip (amber), action chips (role/assignee), active Switch, run stats ("N runs · last Xm ago"), edit/delete.
+   428→  • Authoring dialog: trigger select, condition builder (field select + equals/any-of values), multi-action builder (type + role + title/body), clickable placeholder chips per trigger, "Preview with sample data" (client-side render for unsaved, server /test endpoint for saved), live validation.
+   429→  • Seeded 2 real default rules (system config, upsert-by-name so UI edits are preserved on re-seed): "Urgent ticket escalation" (TICKET_CREATED priority=URGENT → SUPER_ADMIN) and "High-priority lead alert" (LEAD_CREATED priority in [HIGH,URGENT] → ADMIN).
+   430→- Bugs found & fixed during QA (2):
+   431→  1. CRITICAL (caught by dev.log scan, not by the UI): POST /api/automations/[id]/test returned the HTML 404 page — the dry-run handler lived in [id]/route.ts as a POST export but the URL used an extra /test segment, so the route never existed. My first eval "verification" was a stale-document.title artifact — lesson: verify endpoints with fresh assertions, never trust prior page state. Fixed by creating src/app/api/automations/[id]/test/route.ts properly and removing the misplaced POST from [id]/route.ts. Re-verified: 200 + correct preview JSON + UI edit-dialog preview renders.
+   432→  2. Type errors: unexported AutomationCondition, unimported lucide icon refs in TRIGGER_ICON map, condition-union `.in` access, and a variable-shadowing bug (setForm((f) => ...) shadowing an outer field variable f) — all fixed; lint + tsc clean.
+   433→- E2E verified (browser, admin):
+   434→  • REAL trigger #1: created URGENT ticket APX-T-2026-0003 via UI → engine fired → Super Admin received notification "URGENT ticket APX-T-2026-0003: Payment gateway timeout on production checkout" (placeholders rendered) → runCount 1, "last Xm ago" on card.
+   435→  • Condition guard: two MEDIUM tickets → runCount stayed 1 (rule skipped).
+   436→  • REAL trigger #2: HIGH lead APX-L-2026-0004 → "High-priority lead alert" ran once; MEDIUM lead APX-L-2026-0005 → skipped (verifies `in` condition).
+   437→  • Pause behavior: rule deactivated → URGENT ticket created → NO run; reactivated → active again.
+   438→  • Custom rule authoring: "Large payment celebration" (PAYMENT_RECEIVED → ADMIN) built via dialog with placeholder chips; client-side preview rendered sample data; created; card displays.
+   439→  • Dry-run endpoint: both saved rules preview correctly (conditionMet + rendered titles).
+   440→  • Permissions: dev@ — Automations nav hidden, #/automations → NoAccess panel, GET+DELETE /api/automations = 403/403; admin 200.
+   441→  • Audit trail: CREATE + 2× STATUS_CHANGE (pause/reactivate) logged under entityType AUTOMATION.
+   442→  • Mobile 390px: automations view no horizontal overflow (qa/76).
+   443→- QA leftovers: tickets APX-T-2026-0004/0005 (low-priority test tickets) were archived during cleanup evals; leads APX-L-2026-0004 (HIGH, Cairo Retail Group) + APX-L-2026-0005 (MEDIUM, Zamalek Cafe) kept as realistic records; numbering advanced to APX-L-2026-0005 / APX-T-2026-0005. "Large payment celebration" rule kept active as a real config (harmless, useful).
+   444→- Screenshots qa/71-77. Lint clean, tsc clean, 0×5xx in dev.log.
+   445→
+   446→Stage Summary:
+   447→- AUTOMATION ENGINE is LIVE and browser-verified with real triggers, real notifications, real condition guards and a working dry-run API. The original Phase 1-8 roadmap is now FULLY delivered including automation groundwork — 23 real views, zero placeholders.
+   448→- Next-round candidates (from Master Prompt): Client Portal (§72 — customer-facing boundary, support@ account ready), file upload API (FileRecord model exists), password self-service reset from the login screen, dashboard automation-health widget (could show paused rules / recent runs), i18n extraction (§30).
+   449→- Known minor: run stats update after fire (lastRunAt may trail the event by ms — by design); NOTIFY_ASSIGNEE on leads uses assignedToId at creation only (reassignment is not an automation trigger — could be added as LEAD_ASSIGNED trigger later).
+   450→

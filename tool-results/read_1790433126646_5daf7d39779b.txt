@@ -1,0 +1,783 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     4→import { useSession } from "next-auth/react";
+     5→import {
+     6→  Archive, ArchiveRestore, Building2, ChevronLeft, ChevronRight, FolderKanban, Globe,
+     7→  LifeBuoy, Loader2, Mail, MapPin, Pencil, Phone, Plus, Receipt, Search, Star, Trash2, X,
+     8→} from "lucide-react";
+     9→import { PageHeader, EmptyState, ErrorState, StatusBadge, Field, ListSkeleton } from "@/components/shared";
+    10→import { Button } from "@/components/ui/button";
+    11→import { Input } from "@/components/ui/input";
+    12→import { Textarea } from "@/components/ui/textarea";
+    13→import { Checkbox } from "@/components/ui/checkbox";
+    14→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    15→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+    16→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+    17→import { ScrollArea } from "@/components/ui/scroll-area";
+    18→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+    19→import { Separator } from "@/components/ui/separator";
+    20→import {
+    21→  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+    22→  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    23→} from "@/components/ui/alert-dialog";
+    24→import { api, qs, formatDate } from "@/lib/api-client";
+    25→import { useToast } from "@/hooks/use-toast";
+    26→import type { ViewProps } from "@/views/registry";
+    27→import { ActivityTimeline, type ActivityItem, type FollowUpItem } from "@/views/crm/lead-detail";
+    28→
+    29→// ============ Types ============
+    30→
+    31→type ClientRow = {
+    32→  id: string;
+    33→  clientNumber: string;
+    34→  companyName: string;
+    35→  industry: string | null;
+    36→  location: string | null;
+    37→  website: string | null;
+    38→  email: string | null;
+    39→  phone: string | null;
+    40→  status: string;
+    41→  notes: string | null;
+    42→  createdAt: string;
+    43→  _count?: { projects: number; invoices: number; tickets: number };
+    44→};
+    45→
+    46→type Contact = {
+    47→  id: string;
+    48→  clientId: string;
+    49→  name: string;
+    50→  position: string | null;
+    51→  email: string | null;
+    52→  phone: string | null;
+    53→  preferredMethod: string | null;
+    54→  isPrimary: boolean;
+    55→  notes: string | null;
+    56→};
+    57→
+    58→type ClientDetail = ClientRow & {
+    59→  archivedAt: string | null;
+    60→  contacts: Contact[];
+    61→  projects: { id: string; name: string; projectNumber: string; status: string; progress: number; deadline: string | null; type: string }[];
+    62→  invoices: { id: string; invoiceNumber: string; total: number; status: string; issueDate: string }[];
+    63→  tickets: { id: string; subject: string; status: string; priority: string; createdAt: string }[];
+    64→  followUps: FollowUpItem[];
+    65→};
+    66→
+    67→type ClientsResponse = { items: ClientRow[]; total: number; page: number; pageSize: number };
+    68→type ClientDetailResponse = { client: ClientDetail; activities: ActivityItem[] };
+    69→
+    70→const CLIENT_STATUSES = ["ACTIVE", "INACTIVE", "ARCHIVED"] as const;
+    71→
+    72→// ============ View ============
+    73→
+    74→export function ClientsView({ navigate }: ViewProps) {
+    75→  const { data: session } = useSession();
+    76→  const permissions = session?.user?.permissions ?? [];
+    77→  const { toast } = useToast();
+    78→
+    79→  const [q, setQ] = useState("");
+    80→  const [debouncedQ, setDebouncedQ] = useState("");
+    81→  const [status, setStatus] = useState("");
+    82→  const [page, setPage] = useState(1);
+    83→  const pageSize = 12;
+    84→
+    85→  const [data, setData] = useState<ClientsResponse | null>(null);
+    86→  const [loading, setLoading] = useState(true);
+    87→  const [error, setError] = useState<string | null>(null);
+    88→
+    89→  const [detailId, setDetailId] = useState<string | null>(null);
+    90→  const [detailOpen, setDetailOpen] = useState(false);
+    91→  const [detailRefresh, setDetailRefresh] = useState(0);
+    92→  const [formOpen, setFormOpen] = useState(false);
+    93→  const [editClient, setEditClient] = useState<ClientRow | null>(null);
+    94→  const [archiveTarget, setArchiveTarget] = useState<ClientDetail | null>(null);
+    95→
+    96→  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    97→  useEffect(() => {
+    98→    if (debounceRef.current) clearTimeout(debounceRef.current);
+    99→    debounceRef.current = setTimeout(() => { setDebouncedQ(q.trim()); setPage(1); }, 300);
+   100→    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+   101→  }, [q]);
+   102→
+   103→  const load = useCallback(async () => {
+   104→    setLoading(true);
+   105→    setError(null);
+   106→    try {
+   107→      setData(await api.get<ClientsResponse>(`/api/clients${qs({ q: debouncedQ, status, page, pageSize })}`));
+   108→    } catch (err) {
+   109→      setError(err instanceof Error ? err.message : "Failed to load clients.");
+   110→    } finally {
+   111→      setLoading(false);
+   112→    }
+   113→  }, [debouncedQ, status, page]);
+   114→
+   115→  useEffect(() => { load(); }, [load]);
+   116→
+   117→  const hasFilters = debouncedQ !== "" || status !== "";
+   118→  const totalPages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+   119→
+   120→  return (
+   121→    <div>
+   122→      <PageHeader
+   123→        title="Clients"
+   124→        description="Every company you serve — one source of truth with complete business history."
+   125→        actions={permissions.includes("clients.create") ? (
+   126→          <Button onClick={() => setFormOpen(true)}><Plus className="w-4 h-4 mr-2" /> New Client</Button>
+   127→        ) : undefined}
+   128→      />
+   129→
+   130→      {/* Filters */}
+   131→      <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 mb-5">
+   132→        <div className="relative flex-1 min-w-0">
+   133→          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+   134→          <Input
+   135→            value={q}
+   136→            onChange={(e) => setQ(e.target.value)}
+   137→            placeholder="Search company, number, email, phone…"
+   138→            className="pl-9 h-9 bg-secondary/50"
+   139→            aria-label="Search clients"
+   140→          />
+   141→        </div>
+   142→        <div className="flex items-center gap-2">
+   143→          <Select value={status || "ALL"} onValueChange={(v) => { setStatus(v === "ALL" ? "" : v); setPage(1); }}>
+   144→            <SelectTrigger className="h-9 w-[160px]"><SelectValue placeholder="Status" /></SelectTrigger>
+   145→            <SelectContent>
+   146→              <SelectItem value="ALL">All statuses</SelectItem>
+   147→              {CLIENT_STATUSES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+   148→            </SelectContent>
+   149→          </Select>
+   150→          {hasFilters && (
+   151→            <Button variant="ghost" size="sm" className="h-9 text-muted-foreground" onClick={() => { setQ(""); setStatus(""); setPage(1); }}>
+   152→              <X className="w-4 h-4 mr-1.5" /> Clear
+   153→            </Button>
+   154→          )}
+   155→        </div>
+   156→      </div>
+   157→
+   158→      {loading && <ListSkeleton rows={6} />}
+   159→      {!loading && error && <ErrorState message={error} onRetry={load} />}
+   160→
+   161→      {!loading && !error && data && data.items.length === 0 && (
+   162→        <EmptyState
+   163→          icon={<Building2 className="w-5 h-5" />}
+   164→          title={hasFilters ? "No clients match your filters" : "No clients yet"}
+   165→          description={hasFilters ? "Try adjusting or clearing the filters." : "Win a lead and convert it, or create a client manually."}
+   166→          action={
+   167→            hasFilters ? (
+   168→              <Button variant="outline" onClick={() => { setQ(""); setStatus(""); setPage(1); }}>Clear filters</Button>
+   169→            ) : permissions.includes("clients.create") ? (
+   170→              <Button onClick={() => setFormOpen(true)}><Plus className="w-4 h-4 mr-2" /> New Client</Button>
+   171→            ) : undefined
+   172→          }
+   173→        />
+   174→      )}
+   175→
+   176→      {!loading && !error && data && data.items.length > 0 && (
+   177→        <>
+   178→          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+   179→            {data.items.map((client) => (
+   180→              <button
+   181→                key={client.id}
+   182→                onClick={() => { setDetailId(client.id); setDetailOpen(true); }}
+   183→                className="apex-panel p-4 text-left hover:border-primary/40 transition-colors flex flex-col gap-3"
+   184→                aria-label={`Open client ${client.companyName}`}
+   185→              >
+   186→                <div className="flex items-start justify-between gap-2">
+   187→                  <div className="min-w-0">
+   188→                    <p className="font-medium truncate">{client.companyName}</p>
+   189→                    <p className="text-xs text-muted-foreground font-mono mt-0.5" dir="ltr">{client.clientNumber}</p>
+   190→                  </div>
+   191→                  <StatusBadge status={client.status} />
+   192→                </div>
+   193→                {client.industry && (
+   194→                  <p className="text-xs text-muted-foreground truncate -mt-1.5">
+   195→                    {client.industry}{client.location ? ` · ${client.location}` : ""}
+   196→                  </p>
+   197→                )}
+   198→                <div className="flex items-center gap-2 flex-wrap text-[11px] text-muted-foreground">
+   199→                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-secondary/70 border border-border">
+   200→                    <FolderKanban className="w-3 h-3" /> {client._count?.projects ?? 0} projects
+   201→                  </span>
+   202→                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-secondary/70 border border-border">
+   203→                    <Receipt className="w-3 h-3" /> {client._count?.invoices ?? 0} invoices
+   204→                  </span>
+   205→                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-secondary/70 border border-border">
+   206→                    <LifeBuoy className="w-3 h-3" /> {client._count?.tickets ?? 0} tickets
+   207→                  </span>
+   208→                </div>
+   209→                <p className="text-[11px] text-muted-foreground mt-auto">Created {formatDate(client.createdAt)}</p>
+   210→              </button>
+   211→            ))}
+   212→          </div>
+   213→
+   214→          <div className="flex items-center justify-between gap-3 mt-5">
+   215→            <p className="text-xs text-muted-foreground">Page {data.page} of {totalPages} · {data.total} client{data.total === 1 ? "" : "s"}</p>
+   216→            <div className="flex items-center gap-2">
+   217→              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+   218→                <ChevronLeft className="w-4 h-4 mr-1" /> Prev
+   219→              </Button>
+   220→              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+   221→                Next <ChevronRight className="w-4 h-4 ml-1" />
+   222→              </Button>
+   223→            </div>
+   224→          </div>
+   225→        </>
+   226→      )}
+   227→
+   228→      {/* Detail drawer */}
+   229→      <ClientDetailDrawer
+   230→        clientId={detailId}
+   231→        open={detailOpen}
+   232→        refreshSignal={detailRefresh}
+   233→        onOpenChange={setDetailOpen}
+   234→        onChanged={load}
+   235→        navigate={navigate}
+   236→        permissions={permissions}
+   237→        onEdit={(c) => setEditClient(c)}
+   238→        onArchiveRequest={setArchiveTarget}
+   239→      />
+   240→
+   241→      {/* New client */}
+   242→      <ClientFormDialog open={formOpen} onOpenChange={setFormOpen} onSaved={load} />
+   243→
+   244→      {/* Edit client */}
+   245→      {editClient && (
+   246→        <ClientFormDialog
+   247→          open
+   248→          onOpenChange={(o) => !o && setEditClient(null)}
+   249→          client={editClient}
+   250→          onSaved={() => { load(); setDetailRefresh((k) => k + 1); }}
+   251→        />
+   252→      )}
+   253→
+   254→      {/* Archive confirmation */}
+   255→      <AlertDialog open={archiveTarget !== null} onOpenChange={(o) => !o && setArchiveTarget(null)}>
+   256→        <AlertDialogContent>
+   257→          <AlertDialogHeader>
+   258→            <AlertDialogTitle>Archive this client?</AlertDialogTitle>
+   259→            <AlertDialogDescription>
+   260→              {archiveTarget?.companyName} will be moved to the archive. Historical projects and invoices stay intact. You can restore it later.
+   261→            </AlertDialogDescription>
+   262→          </AlertDialogHeader>
+   263→          <AlertDialogFooter>
+   264→            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   265→            <AlertDialogAction
+   266→              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+   267→              onClick={() => {
+   268→                if (!archiveTarget) return;
+   269→                const target = archiveTarget;
+   270→                api.delete(`/api/clients/${target.id}`)
+   271→                  .then(() => { toast({ title: "Client archived", description: target.companyName }); setArchiveTarget(null); load(); })
+   272→                  .catch((err) => { toast({ title: "Could not archive", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" }); setArchiveTarget(null); });
+   273→              }}
+   274→            >
+   275→              Archive client
+   276→            </AlertDialogAction>
+   277→          </AlertDialogFooter>
+   278→        </AlertDialogContent>
+   279→      </AlertDialog>
+   280→    </div>
+   281→  );
+   282→}
+   283→
+   284→// ============ Detail drawer ============
+   285→
+   286→function ClientDetailDrawer({
+   287→  clientId, open, refreshSignal, onOpenChange, onChanged, navigate, permissions, onEdit, onArchiveRequest,
+   288→}: {
+   289→  clientId: string | null;
+   290→  open: boolean;
+   291→  refreshSignal?: number;
+   292→  onOpenChange: (o: boolean) => void;
+   293→  onChanged: () => void;
+   294→  navigate: (p: string) => void;
+   295→  permissions: string[];
+   296→  onEdit: (client: ClientDetail) => void;
+   297→  onArchiveRequest: (client: ClientDetail) => void;
+   298→}) {
+   299→  const { toast } = useToast();
+   300→  const [data, setData] = useState<ClientDetailResponse | null>(null);
+   301→  const [loading, setLoading] = useState(false);
+   302→  const [error, setError] = useState<string | null>(null);
+   303→  const [contactDialog, setContactDialog] = useState<{ mode: "new" | "edit"; contact?: Contact } | null>(null);
+   304→  const [contactDelete, setContactDelete] = useState<Contact | null>(null);
+   305→  const [busy, setBusy] = useState(false);
+   306→
+   307→  const canEdit = permissions.includes("clients.edit");
+   308→  const canDelete = permissions.includes("clients.delete");
+   309→  const canContactsCreate = permissions.includes("contacts.create");
+   310→  const canContactsEdit = permissions.includes("contacts.edit");
+   311→  const canContactsDelete = permissions.includes("contacts.delete");
+   312→
+   313→  const load = useCallback(async () => {
+   314→    if (!clientId) return;
+   315→    setLoading(true);
+   316→    setError(null);
+   317→    try {
+   318→      setData(await api.get<ClientDetailResponse>(`/api/clients/${clientId}`));
+   319→    } catch (err) {
+   320→      setError(err instanceof Error ? err.message : "Failed to load this client.");
+   321→    } finally {
+   322→      setLoading(false);
+   323→    }
+   324→  }, [clientId]);
+   325→
+   326→  useEffect(() => {
+   327→    if (open && clientId) load();
+   328→    if (!open) setData(null);
+   329→  }, [open, clientId, refreshSignal, load]);
+   330→
+   331→  const client = data?.client;
+   332→
+   333→  const toggleArchive = async () => {
+   334→    if (!client) return;
+   335→    if (client.status !== "ARCHIVED" && canDelete) {
+   336→      onArchiveRequest(client);
+   337→      return;
+   338→    }
+   339→    if (client.status === "ARCHIVED" && canEdit) {
+   340→      setBusy(true);
+   341→      try {
+   342→        await api.patch(`/api/clients/${client.id}`, { status: "ACTIVE" });
+   343→        toast({ title: "Client restored", description: client.companyName });
+   344→        await load();
+   345→        onChanged();
+   346→      } catch (err) {
+   347→        toast({ title: "Restore failed", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   348→      } finally {
+   349→        setBusy(false);
+   350→      }
+   351→    }
+   352→  };
+   353→
+   354→  const deleteContact = () => {
+   355→    if (!contactDelete) return;
+   356→    const target = contactDelete;
+   357→    api.delete(`/api/contacts/${target.id}`)
+   358→      .then(() => { toast({ title: "Contact removed", description: target.name }); setContactDelete(null); load(); onChanged(); })
+   359→      .catch((err) => { toast({ title: "Delete failed", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" }); setContactDelete(null); });
+   360→  };
+   361→
+   362→  const projectsTotal = client?.projects.length ?? 0;
+   363→  const openTickets = useMemo(() => (client?.tickets ?? []).filter((t) => !["RESOLVED", "CLOSED"].includes(t.status)).length, [client]);
+   364→
+   365→  return (
+   366→    <>
+   367→      <Sheet open={open} onOpenChange={onOpenChange}>
+   368→        <SheetContent side="right" className="w-full sm:max-w-[520px] p-0 flex flex-col">
+   369→          {loading && !client && <div className="p-5"><ListSkeleton rows={8} /></div>}
+   370→          {!loading && error && <div className="p-5"><ErrorState message={error} onRetry={load} /></div>}
+   371→
+   372→          {client && (
+   373→            <>
+   374→              <SheetHeader className="border-b border-border pb-4">
+   375→                <div className="flex items-start justify-between gap-3 pr-8">
+   376→                  <div className="min-w-0">
+   377→                    <SheetTitle className="truncate text-base">{client.companyName}</SheetTitle>
+   378→                    <SheetDescription className="text-xs font-mono" dir="ltr">{client.clientNumber}</SheetDescription>
+   379→                  </div>
+   380→                  <div className="flex flex-col items-end gap-1.5">
+   381→                    <StatusBadge status={client.status} />
+   382→                    <span className="text-[11px] text-muted-foreground">Created {formatDate(client.createdAt)}</span>
+   383→                  </div>
+   384→                </div>
+   385→                {(canEdit || canDelete) && (
+   386→                  <div className="flex gap-2 mt-2">
+   387→                    {canEdit && (
+   388→                      <Button size="sm" variant="outline" onClick={() => onEdit(client)}>
+   389→                        <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+   390→                      </Button>
+   391→                    )}
+   392→                    {client.status === "ARCHIVED" && canEdit && (
+   393→                      <Button size="sm" variant="outline" onClick={toggleArchive} disabled={busy}>
+   394→                        {busy ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <ArchiveRestore className="w-3.5 h-3.5 mr-1.5" />}
+   395→                        Restore
+   396→                      </Button>
+   397→                    )}
+   398→                    {client.status !== "ARCHIVED" && canDelete && (
+   399→                      <Button size="sm" variant="outline" className="text-rose-300" onClick={toggleArchive}>
+   400→                        <Archive className="w-3.5 h-3.5 mr-1.5" /> Archive
+   401→                      </Button>
+   402→                    )}
+   403→                  </div>
+   404→                )}
+   405→              </SheetHeader>
+   406→
+   407→              <Tabs defaultValue="overview" className="flex-1 flex flex-col min-h-0">
+   408→                <TabsList className="mx-4 mt-3 w-fit">
+   409→                  <TabsTrigger value="overview">Overview</TabsTrigger>
+   410→                  <TabsTrigger value="projects">Projects{projectsTotal > 0 ? ` (${projectsTotal})` : ""}</TabsTrigger>
+   411→                  <TabsTrigger value="history">History</TabsTrigger>
+   412→                </TabsList>
+   413→
+   414→                <ScrollArea className="flex-1 min-h-0">
+   415→                  {/* Overview */}
+   416→                  <TabsContent value="overview" className="px-5 py-4 mt-0">
+   417→                    <div className="divide-y divide-border/60">
+   418→                      <DetailRow icon={<Mail className="w-3.5 h-3.5" />} label="Email" value={client.email ? <span dir="ltr">{client.email}</span> : "—"} />
+   419→                      <DetailRow icon={<Phone className="w-3.5 h-3.5" />} label="Phone" value={client.phone ? <span dir="ltr">{client.phone}</span> : "—"} />
+   420→                      <DetailRow icon={<Globe className="w-3.5 h-3.5" />} label="Website" value={client.website ? <span dir="ltr" className="break-all">{client.website}</span> : "—"} />
+   421→                      <DetailRow icon={<MapPin className="w-3.5 h-3.5" />} label="Location" value={client.location || "—"} />
+   422→                      <DetailRow icon={null} label="Industry" value={client.industry || "—"} />
+   423→                    </div>
+   424→
+   425→                    <Separator className="my-4" />
+   426→
+   427→                    {/* Contacts */}
+   428→                    <div className="flex items-center justify-between mb-3">
+   429→                      <p className="text-sm font-medium">Contacts ({client.contacts.length})</p>
+   430→                      {canContactsCreate && (
+   431→                        <Button size="sm" variant="outline" onClick={() => setContactDialog({ mode: "new" })}>
+   432→                          <Plus className="w-3.5 h-3.5 mr-1.5" /> Add
+   433→                        </Button>
+   434→                      )}
+   435→                    </div>
+   436→                    {client.contacts.length === 0 ? (
+   437→                      <p className="text-sm text-muted-foreground text-center py-5 border border-dashed border-border rounded-lg">No contacts yet.</p>
+   438→                    ) : (
+   439→                      <div className="space-y-2">
+   440→                        {client.contacts.map((c) => (
+   441→                          <div key={c.id} className="rounded-lg border border-border p-3 bg-card/50 flex items-start justify-between gap-2">
+   442→                            <div className="min-w-0">
+   443→                              <div className="flex items-center gap-2 flex-wrap">
+   444→                                <p className="text-sm font-medium">{c.name}</p>
+   445→                                {c.isPrimary && (
+   446→                                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+   447→                                    <Star className="w-3 h-3" /> PRIMARY
+   448→                                  </span>
+   449→                                )}
+   450→                              </div>
+   451→                              <p className="text-xs text-muted-foreground mt-1">
+   452→                                {[c.position, c.email, c.phone, c.preferredMethod].filter(Boolean).join(" · ") || "No details"}
+   453→                              </p>
+   454→                            </div>
+   455→                            {(canContactsEdit || canContactsDelete) && (
+   456→                              <div className="flex items-center gap-1 shrink-0">
+   457→                                {canContactsEdit && (
+   458→                                  <Button variant="ghost" size="icon" className="h-7 w-7" aria-label={`Edit ${c.name}`} onClick={() => setContactDialog({ mode: "edit", contact: c })}>
+   459→                                    <Pencil className="w-3.5 h-3.5" />
+   460→                                  </Button>
+   461→                                )}
+   462→                                {canContactsDelete && (
+   463→                                  <Button variant="ghost" size="icon" className="h-7 w-7 text-rose-300" aria-label={`Remove ${c.name}`} onClick={() => setContactDelete(c)}>
+   464→                                    <Trash2 className="w-3.5 h-3.5" />
+   465→                                  </Button>
+   466→                                )}
+   467→                              </div>
+   468→                            )}
+   469→                          </div>
+   470→                        ))}
+   471→                      </div>
+   472→                    )}
+   473→
+   474→                    {/* Mini stats */}
+   475→                    <Separator className="my-4" />
+   476→                    <div className="grid grid-cols-3 gap-2">
+   477→                      <div className="rounded-lg bg-secondary/40 border border-border p-3 text-center">
+   478→                        <p className="text-lg font-semibold">{projectsTotal}</p>
+   479→                        <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Projects</p>
+   480→                      </div>
+   481→                      <div className="rounded-lg bg-secondary/40 border border-border p-3 text-center">
+   482→                        <p className="text-lg font-semibold">{client.invoices.length}</p>
+   483→                        <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Invoices</p>
+   484→                      </div>
+   485→                      <div className="rounded-lg bg-secondary/40 border border-border p-3 text-center">
+   486→                        <p className="text-lg font-semibold">{openTickets}</p>
+   487→                        <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Open tickets</p>
+   488→                      </div>
+   489→                    </div>
+   490→
+   491→                    {client.notes && (
+   492→                      <>
+   493→                        <Separator className="my-4" />
+   494→                        <p className="text-xs text-muted-foreground mb-1.5">Notes</p>
+   495→                        <p className="text-sm whitespace-pre-wrap">{client.notes}</p>
+   496→                      </>
+   497→                    )}
+   498→                  </TabsContent>
+   499→
+   500→                  {/* Projects */}
+   501→                  <TabsContent value="projects" className="px-5 py-4 mt-0 space-y-2">
+   502→                    {projectsTotal === 0 ? (
+   503→                      <p className="text-sm text-muted-foreground text-center py-8">No projects for this client yet.</p>
+   504→                    ) : (
+   505→                      client.projects.map((p) => (
+   506→                        <button
+   507→                          key={p.id}
+   508→                          onClick={() => navigate("projects")}
+   509→                          className="w-full text-left rounded-lg border border-border p-3.5 bg-card/50 hover:border-primary/40 transition-colors"
+   510→                        >
+   511→                          <div className="flex items-center justify-between gap-2">
+   512→                            <p className="text-sm font-medium truncate">{p.name}</p>
+   513→                            <StatusBadge status={p.status} />
+   514→                          </div>
+   515→                          <p className="text-[11px] text-muted-foreground mt-1 font-mono" dir="ltr">{p.projectNumber}</p>
+   516→                          <div className="flex items-center gap-3 mt-2">
+   517→                            <div className="flex-1 h-1.5 rounded-full bg-secondary overflow-hidden">
+   518→                              <div className="h-full bg-gradient-to-r from-cyan-500 to-sky-500" style={{ width: `${p.progress}%` }} />
+   519→                            </div>
+   520→                            <span className="text-[11px] text-muted-foreground shrink-0">{p.progress}%{p.deadline ? ` · due ${formatDate(p.deadline)}` : ""}</span>
+   521→                          </div>
+   522→                        </button>
+   523→                      ))
+   524→                    )}
+   525→                  </TabsContent>
+   526→
+   527→                  {/* History */}
+   528→                  <TabsContent value="history" className="px-5 py-4 mt-0">
+   529→                    <ActivityTimeline items={data?.activities ?? []} emptyText="No history recorded for this client yet." />
+   530→                  </TabsContent>
+   531→                </ScrollArea>
+   532→              </Tabs>
+   533→            </>
+   534→          )}
+   535→        </SheetContent>
+   536→      </Sheet>
+   537→
+   538→      {/* Contact add/edit dialog */}
+   539→      {client && contactDialog && (
+   540→        <ContactFormDialog
+   541→          open
+   542→          onOpenChange={(o) => !o && setContactDialog(null)}
+   543→          clientId={client.id}
+   544→          contact={contactDialog.mode === "edit" ? contactDialog.contact : null}
+   545→          onSaved={() => { load(); onChanged(); }}
+   546→        />
+   547→      )}
+   548→
+   549→      {/* Contact delete confirmation */}
+   550→      <AlertDialog open={contactDelete !== null} onOpenChange={(o) => !o && setContactDelete(null)}>
+   551→        <AlertDialogContent>
+   552→          <AlertDialogHeader>
+   553→            <AlertDialogTitle>Remove this contact?</AlertDialogTitle>
+   554→            <AlertDialogDescription>“{contactDelete?.name}” will be permanently removed from this client.</AlertDialogDescription>
+   555→          </AlertDialogHeader>
+   556→          <AlertDialogFooter>
+   557→            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   558→            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={deleteContact}>
+   559→              Remove
+   560→            </AlertDialogAction>
+   561→          </AlertDialogFooter>
+   562→        </AlertDialogContent>
+   563→      </AlertDialog>
+   564→    </>
+   565→  );
+   566→}
+   567→
+   568→function DetailRow({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
+   569→  return (
+   570→    <div className="flex items-start justify-between gap-4 py-2">
+   571→      <span className="text-xs text-muted-foreground shrink-0 pt-0.5 inline-flex items-center gap-1.5">{icon}{label}</span>
+   572→      <span className="text-sm text-right break-words min-w-0">{value}</span>
+   573→    </div>
+   574→  );
+   575→}
+   576→
+   577→// ============ Contact form dialog ============
+   578→
+   579→function ContactFormDialog({
+   580→  open, onOpenChange, clientId, contact, onSaved,
+   581→}: {
+   582→  open: boolean;
+   583→  onOpenChange: (o: boolean) => void;
+   584→  clientId: string;
+   585→  contact?: Contact | null;
+   586→  onSaved: () => void;
+   587→}) {
+   588→  const { toast } = useToast();
+   589→  const [name, setName] = useState("");
+   590→  const [position, setPosition] = useState("");
+   591→  const [email, setEmail] = useState("");
+   592→  const [phone, setPhone] = useState("");
+   593→  const [preferredMethod, setPreferredMethod] = useState("EMAIL");
+   594→  const [isPrimary, setIsPrimary] = useState(false);
+   595→  const [notes, setNotes] = useState("");
+   596→  const [formError, setFormError] = useState("");
+   597→  const [saving, setSaving] = useState(false);
+   598→  const isEdit = Boolean(contact);
+   599→
+   600→  useEffect(() => {
+   601→    if (open) {
+   602→      setName(contact?.name || "");
+   603→      setPosition(contact?.position || "");
+   604→      setEmail(contact?.email || "");
+   605→      setPhone(contact?.phone || "");
+   606→      setPreferredMethod(contact?.preferredMethod || "EMAIL");
+   607→      setIsPrimary(contact?.isPrimary || false);
+   608→      setNotes(contact?.notes || "");
+   609→      setFormError("");
+   610→    }
+   611→  }, [open, contact]);
+   612→
+   613→  const submit = async () => {
+   614→    if (name.trim().length < 2) { setFormError("Contact name is required (min 2 characters)."); return; }
+   615→    setSaving(true);
+   616→    const payload = {
+   617→      name: name.trim(),
+   618→      position: position.trim() || null,
+   619→      email: email.trim() || null,
+   620→      phone: phone.trim() || null,
+   621→      preferredMethod,
+   622→      isPrimary,
+   623→      notes: notes.trim() || null,
+   624→    };
+   625→    try {
+   626→      if (isEdit && contact) {
+   627→        await api.patch(`/api/contacts/${contact.id}`, payload);
+   628→        toast({ title: "Contact updated", description: payload.name });
+   629→      } else {
+   630→        await api.post("/api/contacts", { ...payload, clientId });
+   631→        toast({ title: "Contact added", description: payload.name });
+   632→      }
+   633→      onOpenChange(false);
+   634→      onSaved();
+   635→    } catch (err) {
+   636→      toast({ title: isEdit ? "Update failed" : "Could not add contact", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   637→    } finally {
+   638→      setSaving(false);
+   639→    }
+   640→  };
+   641→
+   642→  return (
+   643→    <Dialog open={open} onOpenChange={onOpenChange}>
+   644→      <DialogContent className="sm:max-w-md">
+   645→        <DialogHeader>
+   646→          <DialogTitle>{isEdit ? "Edit contact" : "Add contact"}</DialogTitle>
+   647→          <DialogDescription>People who represent the client — the primary contact is used by default.</DialogDescription>
+   648→        </DialogHeader>
+   649→        <div className="space-y-3">
+   650→          <Field label="Name" required>
+   651→            <Input value={name} onChange={(e) => { setName(e.target.value); setFormError(""); }} />
+   652→          </Field>
+   653→          <div className="grid grid-cols-2 gap-3">
+   654→            <Field label="Position"><Input value={position} onChange={(e) => setPosition(e.target.value)} placeholder="CTO" /></Field>
+   655→            <Field label="Preferred method">
+   656→              <Select value={preferredMethod} onValueChange={setPreferredMethod}>
+   657→                <SelectTrigger><SelectValue /></SelectTrigger>
+   658→                <SelectContent>
+   659→                  <SelectItem value="EMAIL">Email</SelectItem>
+   660→                  <SelectItem value="PHONE">Phone</SelectItem>
+   661→                  <SelectItem value="WHATSAPP">WhatsApp</SelectItem>
+   662→                </SelectContent>
+   663→              </Select>
+   664→            </Field>
+   665→            <Field label="Email"><Input value={email} onChange={(e) => setEmail(e.target.value)} dir="ltr" /></Field>
+   666→            <Field label="Phone"><Input value={phone} onChange={(e) => setPhone(e.target.value)} dir="ltr" /></Field>
+   667→          </div>
+   668→          <label className="flex items-center gap-2.5 cursor-pointer">
+   669→            <Checkbox checked={isPrimary} onCheckedChange={(v) => setIsPrimary(v === true)} />
+   670→            <span className="text-sm">Primary contact</span>
+   671→          </label>
+   672→          <Field label="Notes"><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} /></Field>
+   673→          {formError && <p className="text-xs text-destructive">{formError}</p>}
+   674→        </div>
+   675→        <DialogFooter>
+   676→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+   677→          <Button onClick={submit} disabled={saving}>
+   678→            {saving && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+   679→            {isEdit ? "Save changes" : "Add contact"}
+   680→          </Button>
+   681→        </DialogFooter>
+   682→      </DialogContent>
+   683→    </Dialog>
+   684→  );
+   685→}
+   686→
+   687→// ============ Client create/edit dialog ============
+   688→
+   689→function ClientFormDialog({
+   690→  open, onOpenChange, client, onSaved,
+   691→}: {
+   692→  open: boolean;
+   693→  onOpenChange: (o: boolean) => void;
+   694→  client?: ClientRow | null;
+   695→  onSaved: () => void;
+   696→}) {
+   697→  const { toast } = useToast();
+   698→  const [companyName, setCompanyName] = useState("");
+   699→  const [industry, setIndustry] = useState("");
+   700→  const [location, setLocation] = useState("");
+   701→  const [website, setWebsite] = useState("");
+   702→  const [email, setEmail] = useState("");
+   703→  const [phone, setPhone] = useState("");
+   704→  const [notes, setNotes] = useState("");
+   705→  const [formError, setFormError] = useState("");
+   706→  const [saving, setSaving] = useState(false);
+   707→  const isEdit = Boolean(client);
+   708→
+   709→  useEffect(() => {
+   710→    if (open) {
+   711→      setCompanyName(client?.companyName || "");
+   712→      setIndustry(client?.industry || "");
+   713→      setLocation(client?.location || "");
+   714→      setWebsite(client?.website || "");
+   715→      setEmail(client?.email || "");
+   716→      setPhone(client?.phone || "");
+   717→      setNotes(client?.notes || "");
+   718→      setFormError("");
+   719→    }
+   720→  }, [open, client]);
+   721→
+   722→  const submit = async () => {
+   723→    if (companyName.trim().length < 2) { setFormError("Company name is required (min 2 characters)."); return; }
+   724→    setSaving(true);
+   725→    const payload = {
+   726→      companyName: companyName.trim(),
+   727→      industry: industry.trim() || null,
+   728→      location: location.trim() || null,
+   729→      website: website.trim() || null,
+   730→      email: email.trim() || null,
+   731→      phone: phone.trim() || null,
+   732→      notes: notes.trim() || null,
+   733→    };
+   734→    try {
+   735→      if (isEdit && client) {
+   736→        await api.patch(`/api/clients/${client.id}`, payload);
+   737→        toast({ title: "Client updated", description: payload.companyName });
+   738→      } else {
+   739→        const created = await api.post<{ clientNumber: string }>("/api/clients", payload);
+   740→        toast({ title: "Client created", description: `${created.clientNumber} — ${payload.companyName}` });
+   741→      }
+   742→      onOpenChange(false);
+   743→      onSaved();
+   744→    } catch (err) {
+   745→      toast({ title: isEdit ? "Update failed" : "Could not create client", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   746→    } finally {
+   747→      setSaving(false);
+   748→    }
+   749→  };
+   750→
+   751→  return (
+   752→    <Dialog open={open} onOpenChange={onOpenChange}>
+   753→      <DialogContent className="sm:max-w-lg max-h-[92vh] overflow-y-auto apex-scroll">
+   754→        <DialogHeader>
+   755→          <DialogTitle>{isEdit ? "Edit client" : "New client"}</DialogTitle>
+   756→          <DialogDescription>Company profile shared across projects, invoices and support.</DialogDescription>
+   757→        </DialogHeader>
+   758→        <div className="space-y-3">
+   759→          <Field label="Company name" required>
+   760→            <Input value={companyName} onChange={(e) => { setCompanyName(e.target.value); setFormError(""); }} placeholder="Acme Ltd." />
+   761→          </Field>
+   762→          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   763→            <Field label="Industry"><Input value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="Real estate" /></Field>
+   764→            <Field label="Location"><Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Cairo, Egypt" /></Field>
+   765→            <Field label="Email"><Input value={email} onChange={(e) => setEmail(e.target.value)} dir="ltr" /></Field>
+   766→            <Field label="Phone"><Input value={phone} onChange={(e) => setPhone(e.target.value)} dir="ltr" /></Field>
+   767→          </div>
+   768→          <Field label="Website"><Input value={website} onChange={(e) => setWebsite(e.target.value)} dir="ltr" /></Field>
+   769→          <Field label="Notes"><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} /></Field>
+   770→          {formError && <p className="text-xs text-destructive">{formError}</p>}
+   771→        </div>
+   772→        <DialogFooter>
+   773→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+   774→          <Button onClick={submit} disabled={saving}>
+   775→            {saving && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+   776→            {isEdit ? "Save changes" : "Create client"}
+   777→          </Button>
+   778→        </DialogFooter>
+   779→      </DialogContent>
+   780→    </Dialog>
+   781→  );
+   782→}
+   783→

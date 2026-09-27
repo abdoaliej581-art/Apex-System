@@ -1,0 +1,1062 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+     4→import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, Field } from "@/components/shared";
+     5→import { api, qs, formatCurrency, formatDate, relativeTime } from "@/lib/api-client";
+     6→import { useSession } from "next-auth/react";
+     7→import { useToast } from "@/hooks/use-toast";
+     8→import { Button } from "@/components/ui/button";
+     9→import { Input } from "@/components/ui/input";
+    10→import { Textarea } from "@/components/ui/textarea";
+    11→import { Switch } from "@/components/ui/switch";
+    12→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+    13→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+    14→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+    15→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    16→import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+    17→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+    18→import { Separator } from "@/components/ui/separator";
+    19→import {
+    20→  FileText, Plus, MoreHorizontal, Pencil, Trash2, Eye, Send, CheckCheck, XCircle,
+    21→  Clock, ArrowRight, Wand2, Building2, FolderKanban, UserCheck, ListChecks, RefreshCw,
+    22→} from "lucide-react";
+    23→import { cn } from "@/lib/utils";
+    24→
+    25→// ================= Types =================
+    26→
+    27→type Party = { id: string; companyName: string } | null | undefined;
+    28→
+    29→type ProposalListRow = {
+    30→  id: string; proposalNumber: string; title: string; status: string;
+    31→  currency: string; subtotal: number; discountAmount: number; taxPercent: number; total: number;
+    32→  validUntil?: string | null; sentAt?: string | null; respondedAt?: string | null; createdAt: string;
+    33→  lead?: Party; client?: Party; _count?: { items: number };
+    34→};
+    35→
+    36→type ProposalItemRow = { id: string; description: string; quantity: number; unitPrice: number; total: number; order: number };
+    37→
+    38→type ActivityRow = { id: string; type: string; title: string; description?: string | null; actorName: string; actorColor: string; createdAt: string };
+    39→
+    40→type ProposalDetail = ProposalListRow & {
+    41→  leadId?: string | null; clientId?: string | null;
+    42→  problem?: string | null; solution?: string | null; scope?: string | null; timeline?: string | null;
+    43→  deliverables?: string | null; paymentTerms?: string | null; revisionPolicy?: string | null;
+    44→  maintenanceTerms?: string | null; terms?: string | null; notes?: string | null;
+    45→  items: ProposalItemRow[];
+    46→  lead?: (Party & { contactName?: string | null; email?: string | null; phone?: string | null });
+    47→  client?: (Party & { email?: string | null; phone?: string | null });
+    48→  activities: ActivityRow[];
+    49→};
+    50→
+    51→type ItemDraft = { description: string; quantity: string; unitPrice: string };
+    52→
+    53→type Option = { id: string; label: string };
+    54→
+    55→// ================= Helpers =================
+    56→
+    57→const num = (v: string): number => {
+    58→  const n = parseFloat(v);
+    59→  return Number.isFinite(n) ? n : 0;
+    60→};
+    61→const round2 = (n: number) => Math.round(n * 100) / 100;
+    62→
+    63→/** Mirrors the server formula: total = subtotal - discount + subtotal * tax% / 100 */
+    64→function previewTotals(items: ItemDraft[], discount: number, taxPercent: number) {
+    65→  const subtotal = round2(items.reduce((s, i) => s + num(i.quantity) * num(i.unitPrice), 0));
+    66→  const tax = round2((subtotal * taxPercent) / 100);
+    67→  return { subtotal, tax, total: round2(subtotal - discount + tax) };
+    68→}
+    69→
+    70→function extractList(data: unknown): Record<string, unknown>[] {
+    71→  if (Array.isArray(data)) return data as Record<string, unknown>[];
+    72→  if (data && typeof data === "object") {
+    73→    const obj = data as Record<string, unknown>;
+    74→    for (const key of ["items", "leads", "clients", "projects", "team"]) {
+    75→      if (Array.isArray(obj[key])) return obj[key] as Record<string, unknown>[];
+    76→    }
+    77→  }
+    78→  return [];
+    79→}
+    80→
+    81→function toOptions(url: string, labelKey: string): Promise<Option[]> {
+    82→  return api.get<unknown>(url)
+    83→    .then((data) => extractList(data).map((x) => ({ id: String(x.id), label: String(x[labelKey] ?? x.name ?? x.companyName ?? "") })).filter((o) => o.label))
+    84→    .catch(() => []);
+    85→}
+    86→
+    87→function parseDeliverables(raw?: string | null): string[] {
+    88→  if (!raw) return [];
+    89→  try {
+    90→    const v = JSON.parse(raw);
+    91→    return Array.isArray(v) ? v.map(String) : [String(v)];
+    92→  } catch {
+    93→    return raw.split("\n").map((s) => s.trim()).filter(Boolean);
+    94→  }
+    95→}
+    96→
+    97→const ACTIVE_STATUSES = ["DRAFT", "SENT", "VIEWED"];
+    98→const STEP_ORDER = ["DRAFT", "SENT", "VIEWED"];
+    99→const TERMINALS: Record<string, { label: string; tone: string }> = {
+   100→  ACCEPTED: { label: "Accepted", tone: "text-emerald-300 border-emerald-500/40 bg-emerald-500/10" },
+   101→  REJECTED: { label: "Rejected", tone: "text-rose-300 border-rose-500/40 bg-rose-500/10" },
+   102→  EXPIRED: { label: "Expired", tone: "text-amber-300 border-amber-500/40 bg-amber-500/10" },
+   103→};
+   104→
+   105→function toDateInput(d: string | Date): string {
+   106→  const x = new Date(d);
+   107→  const p = (n: number) => String(n).padStart(2, "0");
+   108→  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+   109→}
+   110→
+   111→// ================= Items editor =================
+   112→
+   113→function ItemsEditor({ items, onChange, currency, disabled }: {
+   114→  items: ItemDraft[]; onChange: (items: ItemDraft[]) => void; currency: string; disabled?: boolean;
+   115→}) {
+   116→  const totals = previewTotals(items, 0, 0);
+   117→  return (
+   118→    <div className="rounded-lg border border-border overflow-hidden">
+   119→      <div className="hidden md:grid grid-cols-[1fr_90px_120px_110px_36px] gap-2 px-3 py-2 bg-secondary/50 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+   120→        <span>Description</span><span>Qty</span><span>Unit price</span><span className="text-right">Line total</span><span />
+   121→      </div>
+   122→      <div className="divide-y divide-border max-h-72 overflow-y-auto apex-scroll">
+   123→        {items.map((item, idx) => (
+   124→          <div key={idx} className="grid grid-cols-[1fr_72px_64px] md:grid-cols-[1fr_90px_120px_110px_36px] gap-2 px-3 py-2 items-center">
+   125→            <Input
+   126→              value={item.description}
+   127→              disabled={disabled}
+   128→              onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, description: e.target.value } : it)))}
+   129→              placeholder={`Item ${idx + 1} — e.g. Landing page design`}
+   130→              className="col-span-3 md:col-span-1 h-8 text-sm"
+   131→            />
+   132→            <Input
+   133→              type="number" min={0} step={0.5} value={item.quantity} disabled={disabled}
+   134→              onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, quantity: e.target.value } : it)))}
+   135→              className="h-8 text-sm" aria-label="Quantity"
+   136→            />
+   137→            <Input
+   138→              type="number" min={0} step={0.01} value={item.unitPrice} disabled={disabled}
+   139→              onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, unitPrice: e.target.value } : it)))}
+   140→              className="h-8 text-sm" aria-label="Unit price"
+   141→            />
+   142→            <span className="hidden md:block text-sm font-medium text-right tabular-nums">
+   143→              {formatCurrency(round2(num(item.quantity) * num(item.unitPrice)), currency)}
+   144→            </span>
+   145→            <Button
+   146→              variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive justify-self-end"
+   147→              disabled={disabled || items.length <= 1}
+   148→              onClick={() => onChange(items.filter((_, i) => i !== idx))}
+   149→              title="Remove item"
+   150→            >
+   151→              <Trash2 className="w-3.5 h-3.5" />
+   152→            </Button>
+   153→          </div>
+   154→        ))}
+   155→      </div>
+   156→      <div className="flex items-center justify-between px-3 py-2 bg-secondary/30 border-t border-border">
+   157→        <Button variant="outline" size="sm" disabled={disabled} onClick={() => onChange([...items, { description: "", quantity: "1", unitPrice: "0" }])}>
+   158→          <Plus className="w-3.5 h-3.5 mr-1.5" /> Add item
+   159→        </Button>
+   160→        <p className="text-xs text-muted-foreground">Items subtotal: <span className="font-semibold text-foreground tabular-nums">{formatCurrency(totals.subtotal, currency)}</span></p>
+   161→      </div>
+   162→    </div>
+   163→  );
+   164→}
+   165→
+   166→// ================= Status stepper =================
+   167→
+   168→function StatusStepper({ status }: { status: string }) {
+   169→  const currentIdx = STEP_ORDER.indexOf(status);
+   170→  const terminal = TERMINALS[status];
+   171→  return (
+   172→    <div className="flex items-center gap-1.5 flex-wrap">
+   173→      {STEP_ORDER.map((step, i) => {
+   174→        const done = currentIdx >= 0 && i <= currentIdx;
+   175→        const isCurrent = i === currentIdx;
+   176→        return (
+   177→          <div key={step} className="flex items-center gap-1.5">
+   178→            <span
+   179→              className={cn(
+   180→                "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium",
+   181→                done ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground",
+   182→                isCurrent && "apex-glow"
+   183→              )}
+   184→            >
+   185→              <span className={cn("w-1.5 h-1.5 rounded-full", done ? "bg-primary" : "bg-muted-foreground/50")} />
+   186→              {step.charAt(0) + step.slice(1).toLowerCase()}
+   187→            </span>
+   188→            {i < STEP_ORDER.length - 1 && <ArrowRight className="w-3 h-3 text-muted-foreground/50" />}
+   189→          </div>
+   190→        );
+   191→      })}
+   192→      {terminal ? (
+   193→        <div className="flex items-center gap-1.5">
+   194→          <ArrowRight className="w-3 h-3 text-muted-foreground/50" />
+   195→          <span className={cn("inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold", terminal.tone)}>
+   196→            <CheckCheck className="w-3 h-3" /> {terminal.label}
+   197→          </span>
+   198→        </div>
+   199→      ) : (
+   200→        <div className="flex items-center gap-1.5">
+   201→          <ArrowRight className="w-3 h-3 text-muted-foreground/50" />
+   202→          <span className="inline-flex items-center px-2.5 py-1 rounded-full border border-dashed border-border text-[11px] text-muted-foreground">Pending decision</span>
+   203→        </div>
+   204→      )}
+   205→    </div>
+   206→  );
+   207→}
+   208→
+   209→// ================= Convert dialog (§62) =================
+   210→
+   211→const PROJECT_TYPES = ["BUSINESS_WEBSITE", "ECOMMERCE", "WEB_APP", "MOBILE_APP", "UI_UX_DESIGN", "SEO", "BRANDING", "MAINTENANCE", "OTHER"];
+   212→
+   213→function ConvertDialog({ proposal, open, onClose, onConverted, navigate }: {
+   214→  proposal: ProposalDetail | null; open: boolean;
+   215→  onClose: () => void; onConverted: () => void; navigate: (p: string) => void;
+   216→}) {
+   217→  const { toast } = useToast();
+   218→  const [saving, setSaving] = useState(false);
+   219→  const [managers, setManagers] = useState<Option[]>([]);
+   220→  const source = proposal?.lead ?? proposal?.client ?? null;
+   221→  const [form, setForm] = useState({
+   222→    createClient: true, companyName: "", email: "", phone: "", contactName: "",
+   223→    createProject: true, projectName: "", projectType: "BUSINESS_WEBSITE", managerId: "", notifyPm: true,
+   224→  });
+   225→
+   226→  useEffect(() => {
+   227→    if (!open || !proposal) return;
+   228→    setForm({
+   229→      createClient: !proposal.clientId,
+   230→      companyName: proposal.lead?.companyName ?? proposal.client?.companyName ?? "",
+   231→      email: proposal.lead?.email ?? proposal.client?.email ?? "",
+   232→      phone: proposal.lead?.phone ?? proposal.client?.phone ?? "",
+   233→      contactName: proposal.lead?.contactName ?? "",
+   234→      createProject: !proposal.clientId,
+   235→      projectName: proposal.title,
+   236→      projectType: "BUSINESS_WEBSITE",
+   237→      managerId: "",
+   238→      notifyPm: true,
+   239→    });
+   240→    // Manager options degrade silently when team.view is not granted
+   241→    api.get<{ team: { id: string; name: string }[] }>("/api/team")
+   242→      .then((d) => setManagers((d.team ?? []).map((m) => ({ id: m.id, label: m.name }))))
+   243→      .catch(() => setManagers([]));
+   244→  }, [open, proposal]);
+   245→
+   246→  const convert = async () => {
+   247→    if (!proposal) return;
+   248→    if (form.createClient && form.companyName.trim().length < 2) {
+   249→      return toast({ title: "Company name is required" });
+   250→    }
+   251→    if (form.createProject && form.projectName.trim().length < 2) {
+   252→      return toast({ title: "Project name is required" });
+   253→    }
+   254→    setSaving(true);
+   255→    try {
+   256→      const res = await api.post<{ clientId: string | null; projectId: string | null; clientNumber: string | null; projectNumber: string | null }>(
+   257→        "/api/conversions",
+   258→        {
+   259→          proposalId: proposal.id,
+   260→          options: {
+   261→            createClient: form.createClient,
+   262→            client: form.createClient
+   263→              ? { companyName: form.companyName.trim(), email: form.email.trim() || undefined, phone: form.phone.trim() || undefined }
+   264→              : undefined,
+   265→            contact: form.createClient && form.contactName.trim()
+   266→              ? { name: form.contactName.trim(), email: form.email.trim() || undefined, phone: form.phone.trim() || undefined }
+   267→              : undefined,
+   268→            createProject: form.createProject,
+   269→            project: form.createProject
+   270→              ? { name: form.projectName.trim(), type: form.projectType, managerId: form.managerId || undefined }
+   271→              : undefined,
+   272→            notifyProjectManager: form.notifyPm,
+   273→          },
+   274→        }
+   275→      );
+   276→      toast({
+   277→        title: "Proposal accepted — converted",
+   278→        description: [res.clientNumber ? `Client ${res.clientNumber}` : null, res.projectNumber ? `Project ${res.projectNumber}` : null].filter(Boolean).join(" · ") || "No records created",
+   279→      });
+   280→      onConverted();
+   281→      onClose();
+   282→      navigate("crm/clients");
+   283→    } catch (e) {
+   284→      toast({ title: "Conversion failed", description: e instanceof Error ? e.message : undefined });
+   285→    } finally {
+   286→      setSaving(false);
+   287→    }
+   288→  };
+   289→
+   290→  const acceptOnly = async () => {
+   291→    if (!proposal) return;
+   292→    setSaving(true);
+   293→    try {
+   294→      await api.patch(`/api/proposals/${proposal.id}`, { status: "ACCEPTED" });
+   295→      toast({ title: "Proposal accepted" });
+   296→      onConverted();
+   297→      onClose();
+   298→    } catch (e) {
+   299→      toast({ title: "Could not accept proposal", description: e instanceof Error ? e.message : undefined });
+   300→    } finally {
+   301→      setSaving(false);
+   302→    }
+   303→  };
+   304→
+   305→  return (
+   306→    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+   307→      <DialogContent className="sm:max-w-lg">
+   308→        <DialogHeader>
+   309→          <DialogTitle className="flex items-center gap-2"><Wand2 className="w-4 h-4 text-primary" /> Convert to Client &amp; Project</DialogTitle>
+   310→          <DialogDescription>
+   311→            Accepting <span className="text-foreground font-medium">{proposal?.proposalNumber}</span> can create the client record
+   312→            {source ? <> from <span className="text-foreground font-medium">{source.companyName}</span></> : null} and kick off delivery.
+   313→          </DialogDescription>
+   314→        </DialogHeader>
+   315→        <div className="max-h-[60vh] overflow-y-auto apex-scroll pr-1 space-y-4">
+   316→          <div className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
+   317→            <div>
+   318→              <p className="text-sm font-medium flex items-center gap-2"><Building2 className="w-4 h-4 text-primary" /> Create client</p>
+   319→              <p className="text-xs text-muted-foreground mt-0.5">Company record with numbering, ready for projects and invoices.</p>
+   320→            </div>
+   321→            <Switch checked={form.createClient} onCheckedChange={(v) => setForm({ ...form, createClient: v })} />
+   322→          </div>
+   323→          {form.createClient && (
+   324→            <div className="space-y-3">
+   325→              <Field label="Company name" required>
+   326→                <Input value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} placeholder="Company name" />
+   327→              </Field>
+   328→              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   329→                <Field label="Email">
+   330→                  <Input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="hello@company.com" />
+   331→                </Field>
+   332→                <Field label="Phone">
+   333→                  <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="+20 10 1234 5678" />
+   334→                </Field>
+   335→              </div>
+   336→              <Field label="Primary contact name">
+   337→                <Input value={form.contactName} onChange={(e) => setForm({ ...form, contactName: e.target.value })} placeholder="Person we deal with" />
+   338→              </Field>
+   339→            </div>
+   340→          )}
+   341→          <Separator />
+   342→          <div className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
+   343→            <div>
+   344→              <p className="text-sm font-medium flex items-center gap-2"><FolderKanban className="w-4 h-4 text-primary" /> Create project</p>
+   345→              <p className="text-xs text-muted-foreground mt-0.5">Includes the onboarding checklist and PM notification.</p>
+   346→            </div>
+   347→            <Switch checked={form.createProject} onCheckedChange={(v) => setForm({ ...form, createProject: v, notifyPm: v ? form.notifyPm : false })} disabled={!form.createClient || !proposal?.clientId ? !form.createClient : false} />
+   348→            {proposal?.clientId && (
+   349→              <p className="text-xs text-muted-foreground mt-1">
+   350→                This proposal is already linked to a client — create new delivery projects from the Projects module.
+   351→              </p>
+   352→            )}
+   353→          </div>
+   354→          {form.createProject && (
+   355→            <div className="space-y-3">
+   356→              <Field label="Project name" required>
+   357→                <Input value={form.projectName} onChange={(e) => setForm({ ...form, projectName: e.target.value })} />
+   358→              </Field>
+   359→              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   360→                <Field label="Project type">
+   361→                  <Select value={form.projectType} onValueChange={(v) => setForm({ ...form, projectType: v })}>
+   362→                    <SelectTrigger><SelectValue /></SelectTrigger>
+   363→                    <SelectContent>
+   364→                      {PROJECT_TYPES.map((t) => <SelectItem key={t} value={t}>{t.replace(/_/g, " ")}</SelectItem>)}
+   365→                    </SelectContent>
+   366→                  </Select>
+   367→                </Field>
+   368→                {managers.length > 0 && (
+   369→                  <Field label="Project manager">
+   370→                    <Select value={form.managerId || "NONE"} onValueChange={(v) => setForm({ ...form, managerId: v === "NONE" ? "" : v })}>
+   371→                      <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
+   372→                      <SelectContent className="max-h-60">
+   373→                        <SelectItem value="NONE">Unassigned</SelectItem>
+   374→                        {managers.map((m) => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
+   375→                      </SelectContent>
+   376→                    </Select>
+   377→                  </Field>
+   378→                )}
+   379→              </div>
+   380→              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+   381→                <p className="text-sm">Notify the project manager</p>
+   382→                <Switch checked={form.notifyPm} onCheckedChange={(v) => setForm({ ...form, notifyPm: v })} />
+   383→              </div>
+   384→            </div>
+   385→          )}
+   386→        </div>
+   387→        <DialogFooter className="sm:justify-between gap-2">
+   388→          <Button variant="outline" onClick={acceptOnly} disabled={saving}>Mark accepted only</Button>
+   389→          <Button onClick={convert} disabled={saving || (!form.createClient && !form.createProject)}>
+   390→            <UserCheck className="w-4 h-4 mr-2" /> {saving ? "Converting…" : "Accept & Convert"}
+   391→          </Button>
+   392→        </DialogFooter>
+   393→      </DialogContent>
+   394→    </Dialog>
+   395→  );
+   396→}
+   397→
+   398→// ================= Detail sheet =================
+   399→
+   400→function DetailBlock({ label, children }: { label: string; children?: ReactNode }) {
+   401→  if (!children) return null;
+   402→  return (
+   403→    <div>
+   404→      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">{label}</p>
+   405→      <div className="text-sm whitespace-pre-wrap leading-relaxed">{children}</div>
+   406→    </div>
+   407→  );
+   408→}
+   409→
+   410→function ProposalDetailSheet({ id, open, onOpenChange, onChanged, onConvert, canEdit, canDelete, onDeleteRequest }: {
+   411→  id: string | null; open: boolean; onOpenChange: (o: boolean) => void;
+   412→  onChanged: () => void; onConvert: (p: ProposalDetail) => void;
+   413→  canEdit: boolean; canDelete: boolean; onDeleteRequest: (row: ProposalListRow) => void;
+   414→}) {
+   415→  const { toast } = useToast();
+   416→  const [detail, setDetail] = useState<ProposalDetail | null>(null);
+   417→  const [loading, setLoading] = useState(false);
+   418→  const [acting, setActing] = useState(false);
+   419→
+   420→  const loadDetail = useCallback(async () => {
+   421→    if (!id) return;
+   422→    setLoading(true);
+   423→    try {
+   424→      setDetail(await api.get<ProposalDetail>(`/api/proposals/${id}`));
+   425→    } catch (e) {
+   426→      toast({ title: "Could not load proposal", description: e instanceof Error ? e.message : undefined });
+   427→    } finally {
+   428→      setLoading(false);
+   429→    }
+   430→  }, [id, toast]);
+   431→
+   432→  useEffect(() => {
+   433→    if (open && id) loadDetail();
+   434→    if (!open) setDetail(null);
+   435→  }, [open, id, loadDetail]);
+   436→
+   437→  const act = async (status: string, successTitle: string) => {
+   438→    if (!id) return;
+   439→    setActing(true);
+   440→    try {
+   441→      await api.patch(`/api/proposals/${id}`, { status });
+   442→      toast({ title: successTitle });
+   443→      await loadDetail();
+   444→      onChanged();
+   445→    } catch (e) {
+   446→      toast({ title: "Action failed", description: e instanceof Error ? e.message : undefined });
+   447→    } finally {
+   448→      setActing(false);
+   449→    }
+   450→  };
+   451→
+   452→  const currency = detail?.currency ?? "EGP";
+   453→  const active = detail ? ACTIVE_STATUSES.includes(detail.status) : false;
+   454→  const expired = detail?.validUntil ? new Date(detail.validUntil) < new Date() && active : false;
+   455→
+   456→  return (
+   457→    <Sheet open={open} onOpenChange={onOpenChange}>
+   458→      <SheetContent side="right" className="w-full sm:max-w-xl p-0 flex flex-col">
+   459→        {loading || !detail ? (
+   460→          <div className="p-6"><ListSkeleton rows={8} /></div>
+   461→        ) : (
+   462→          <>
+   463→            <SheetHeader className="p-5 pb-3 border-b border-border">
+   464→              <div className="flex items-start justify-between gap-3">
+   465→                <div className="min-w-0">
+   466→                  <SheetTitle className="flex items-center gap-2 text-base">
+   467→                    <FileText className="w-4 h-4 text-primary shrink-0" /> {detail.proposalNumber}
+   468→                  </SheetTitle>
+   469→                  <SheetDescription className="mt-1 line-clamp-2">{detail.title}</SheetDescription>
+   470→                </div>
+   471→                <StatusBadge status={detail.status} />
+   472→              </div>
+   473→              <div className="mt-3"><StatusStepper status={detail.status} /></div>
+   474→              {canEdit && ACTIVE_STATUSES.includes(detail.status) && (
+   475→                <div className="flex flex-wrap gap-2 mt-3">
+   476→                  {detail.status === "DRAFT" && (
+   477→                    <Button size="sm" onClick={() => act("SENT", "Proposal sent")} disabled={acting}>
+   478→                      <Send className="w-3.5 h-3.5 mr-1.5" /> Send proposal
+   479→                    </Button>
+   480→                  )}
+   481→                  {detail.status === "SENT" && (
+   482→                    <Button size="sm" variant="outline" onClick={() => act("VIEWED", "Marked as viewed")} disabled={acting}>
+   483→                      <Eye className="w-3.5 h-3.5 mr-1.5" /> Mark viewed
+   484→                    </Button>
+   485→                  )}
+   486→                  {detail.status !== "DRAFT" && (
+   487→                    <>
+   488→                      <Button size="sm" className="bg-emerald-600 hover:bg-emerald-600/90 text-white" onClick={() => onConvert(detail)} disabled={acting}>
+   489→                        <CheckCheck className="w-3.5 h-3.5 mr-1.5" /> Accept
+   490→                      </Button>
+   491→                      <Button size="sm" variant="outline" className="text-rose-300 hover:text-rose-200" onClick={() => act("REJECTED", "Proposal rejected")} disabled={acting}>
+   492→                        <XCircle className="w-3.5 h-3.5 mr-1.5" /> Reject
+   493→                      </Button>
+   494→                      <Button size="sm" variant="ghost" className="text-amber-300 hover:text-amber-200" onClick={() => act("EXPIRED", "Proposal marked expired")} disabled={acting}>
+   495→                        <Clock className="w-3.5 h-3.5 mr-1.5" /> Expire
+   496→                      </Button>
+   497→                    </>
+   498→                  )}
+   499→                </div>
+   500→              )}
+   501→              {detail.status === "ACCEPTED" && detail.clientId && (
+   502→                <p className="text-xs text-emerald-300 mt-3 flex items-center gap-1.5">
+   503→                  <CheckCheck className="w-3.5 h-3.5" /> Accepted and linked to a client — delivery can start.
+   504→                </p>
+   505→              )}
+   506→            </SheetHeader>
+   507→
+   508→            <Tabs defaultValue="details" className="flex-1 flex flex-col min-h-0">
+   509→              <TabsList className="mx-5 mt-3 w-fit">
+   510→                <TabsTrigger value="details">Details</TabsTrigger>
+   511→                <TabsTrigger value="activity">Activity ({detail.activities.length})</TabsTrigger>
+   512→              </TabsList>
+   513→              <div className="flex-1 overflow-y-auto apex-scroll p-5 pt-3 space-y-5">
+   514→                <TabsContent value="details" className="mt-0 space-y-5">
+   515→                  {/* Meta */}
+   516→                  <div className="grid grid-cols-2 gap-3 text-sm">
+   517→                    <div>
+   518→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Lead / Client</p>
+   519→                      <p className="font-medium">{detail.lead?.companyName ?? detail.client?.companyName ?? "Unlinked"}</p>
+   520→                    </div>
+   521→                    <div>
+   522→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Valid until</p>
+   523→                      <p className={cn("font-medium", expired && "text-rose-400")}>
+   524→                        {formatDate(detail.validUntil)}{expired && " · expired"}
+   525→                      </p>
+   526→                    </div>
+   527→                    <div>
+   528→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Sent</p>
+   529→                      <p className="font-medium">{formatDate(detail.sentAt)}</p>
+   530→                    </div>
+   531→                    <div>
+   532→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Responded</p>
+   533→                      <p className="font-medium">{formatDate(detail.respondedAt)}</p>
+   534→                    </div>
+   535→                  </div>
+   536→
+   537→                  {/* Financials */}
+   538→                  <div className="rounded-lg border border-border p-4 space-y-1.5">
+   539→                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Financials</p>
+   540→                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span className="tabular-nums">{formatCurrency(detail.subtotal, currency)}</span></div>
+   541→                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Discount</span><span className="tabular-nums">−{formatCurrency(detail.discountAmount, currency)}</span></div>
+   542→                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Tax ({detail.taxPercent}%)</span><span className="tabular-nums">{formatCurrency(round2((detail.subtotal * detail.taxPercent) / 100), currency)}</span></div>
+   543→                    <Separator className="my-2" />
+   544→                    <div className="flex justify-between font-semibold"><span>Total</span><span className="tabular-nums text-primary">{formatCurrency(detail.total, currency)}</span></div>
+   545→                  </div>
+   546→
+   547→                  {/* Items */}
+   548→                  {detail.items.length > 0 && (
+   549→                    <div>
+   550→                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Line items</p>
+   551→                      <div className="rounded-lg border border-border divide-y divide-border">
+   552→                        {detail.items.map((it) => (
+   553→                          <div key={it.id} className="flex items-start justify-between gap-3 px-3 py-2 text-sm">
+   554→                            <div className="min-w-0">
+   555→                              <p className="truncate">{it.description}</p>
+   556→                              <p className="text-[11px] text-muted-foreground">{it.quantity} × {formatCurrency(it.unitPrice, currency)}</p>
+   557→                            </div>
+   558→                            <span className="font-medium tabular-nums shrink-0">{formatCurrency(it.total, currency)}</span>
+   559→                          </div>
+   560→                        ))}
+   561→                      </div>
+   562→                    </div>
+   563→                  )}
+   564→
+   565→                  {/* Content */}
+   566→                  <DetailBlock label="Problem">{detail.problem}</DetailBlock>
+   567→                  <DetailBlock label="Solution">{detail.solution}</DetailBlock>
+   568→                  <DetailBlock label="Scope">{detail.scope}</DetailBlock>
+   569→                  <DetailBlock label="Timeline">{detail.timeline}</DetailBlock>
+   570→                  {parseDeliverables(detail.deliverables).length > 0 && (
+   571→                    <div>
+   572→                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Deliverables</p>
+   573→                      <ul className="text-sm space-y-1">
+   574→                        {parseDeliverables(detail.deliverables).map((d, i) => (
+   575→                          <li key={i} className="flex items-start gap-2"><ListChecks className="w-3.5 h-3.5 mt-0.5 text-primary shrink-0" /> {d}</li>
+   576→                        ))}
+   577→                      </ul>
+   578→                    </div>
+   579→                  )}
+   580→                  <DetailBlock label="Payment terms">{detail.paymentTerms}</DetailBlock>
+   581→                  <DetailBlock label="Revision policy">{detail.revisionPolicy}</DetailBlock>
+   582→                  <DetailBlock label="Maintenance terms">{detail.maintenanceTerms}</DetailBlock>
+   583→                  <DetailBlock label="Terms">{detail.terms}</DetailBlock>
+   584→                  <DetailBlock label="Internal notes">{detail.notes}</DetailBlock>
+   585→
+   586→                  {canDelete && detail.status === "DRAFT" && (
+   587→                    <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => onDeleteRequest(detail)}>
+   588→                      <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Delete draft
+   589→                    </Button>
+   590→                  )}
+   591→                </TabsContent>
+   592→
+   593→                <TabsContent value="activity" className="mt-0">
+   594→                  {detail.activities.length === 0 ? (
+   595→                    <p className="text-sm text-muted-foreground text-center py-8">No activity recorded yet.</p>
+   596→                  ) : (
+   597→                    <div className="space-y-4">
+   598→                      {detail.activities.map((a) => (
+   599→                        <div key={a.id} className="flex gap-3">
+   600→                          <div
+   601→                            className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 border"
+   602→                            style={{ backgroundColor: `${a.actorColor}22`, color: a.actorColor, borderColor: `${a.actorColor}55` }}
+   603→                          >
+   604→                            {a.actorName.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
+   605→                          </div>
+   606→                          <div className="min-w-0">
+   607→                            <p className="text-sm leading-snug">{a.title}</p>
+   608→                            {a.description && <p className="text-xs text-muted-foreground mt-0.5">{a.description}</p>}
+   609→                            <p className="text-[11px] text-muted-foreground mt-0.5">{a.actorName} · {relativeTime(a.createdAt)}</p>
+   610→                          </div>
+   611→                        </div>
+   612→                      ))}
+   613→                    </div>
+   614→                  )}
+   615→                </TabsContent>
+   616→              </div>
+   617→            </Tabs>
+   618→          </>
+   619→        )}
+   620→      </SheetContent>
+   621→    </Sheet>
+   622→  );
+   623→}
+   624→
+   625→// ================= Main view =================
+   626→
+   627→export function ProposalsView({ navigate }: { navigate: (p: string) => void }) {
+   628→  const { toast } = useToast();
+   629→  const { data: session } = useSession();
+   630→  const perms = session?.user?.permissions || [];
+   631→  const canCreate = perms.includes("proposals.create");
+   632→  const canEdit = perms.includes("proposals.edit");
+   633→  const canDelete = perms.includes("proposals.delete");
+   634→
+   635→  const [rows, setRows] = useState<ProposalListRow[]>([]);
+   636→  const [total, setTotal] = useState(0);
+   637→  const [page, setPage] = useState(1);
+   638→  const [pageSize] = useState(25);
+   639→  const [loading, setLoading] = useState(true);
+   640→  const [error, setError] = useState(false);
+   641→  const [statusFilter, setStatusFilter] = useState("ALL");
+   642→  const [search, setSearch] = useState("");
+   643→  const [query, setQuery] = useState("");
+   644→  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+   645→
+   646→  // Builder
+   647→  const [builderOpen, setBuilderOpen] = useState(false);
+   648→  const [editingId, setEditingId] = useState<string | null>(null);
+   649→  const [saving, setSaving] = useState(false);
+   650→  const [form, setForm] = useState({
+   651→    title: "", leadId: "", clientId: "", problem: "", solution: "", scope: "",
+   652→    deliverables: "", timeline: "", validUntil: "", currency: "EGP",
+   653→    discountAmount: "0", taxPercent: "0", paymentTerms: "", revisionPolicy: "",
+   654→    maintenanceTerms: "", terms: "", notes: "",
+   655→  });
+   656→  const [items, setItems] = useState<ItemDraft[]>([{ description: "", quantity: "1", unitPrice: "0" }]);
+   657→  const [leadOpts, setLeadOpts] = useState<Option[]>([]);
+   658→  const [clientOpts, setClientOpts] = useState<Option[]>([]);
+   659→
+   660→  // Detail sheet / convert / delete
+   661→  const [detailId, setDetailId] = useState<string | null>(null);
+   662→  const [sheetOpen, setSheetOpen] = useState(false);
+   663→  const [convertTarget, setConvertTarget] = useState<ProposalDetail | null>(null);
+   664→  const [convertOpen, setConvertOpen] = useState(false);
+   665→  const [deleting, setDeleting] = useState<ProposalListRow | null>(null);
+   666→
+   667→  const load = useCallback(async (opts?: { page?: number; status?: string; q?: string }) => {
+   668→    const p = opts?.page ?? page;
+   669→    const st = opts?.status ?? statusFilter;
+   670→    const q = opts?.q ?? query;
+   671→    setLoading(true);
+   672→    setError(false);
+   673→    try {
+   674→      const data = await api.get<{ items: ProposalListRow[]; total: number }>(
+   675→        `/api/proposals${qs({ page: p, pageSize, status: st === "ALL" ? undefined : st, q: q || undefined })}`
+   676→      );
+   677→      setRows(data.items);
+   678→      setTotal(data.total);
+   679→      setPage(p);
+   680→    } catch (e) {
+   681→      setError(true);
+   682→      toast({ title: "Could not load proposals", description: e instanceof Error ? e.message : undefined });
+   683→    } finally {
+   684→      setLoading(false);
+   685→    }
+   686→  }, [page, statusFilter, query, pageSize, toast]);
+   687→
+   688→  useEffect(() => { load({ page: 1, status: statusFilter, q: query }); }, [statusFilter, query]);
+   689→
+   690→  useEffect(() => {
+   691→    Promise.all([toOptions("/api/leads?pageSize=100", "companyName"), toOptions("/api/clients?pageSize=100", "companyName")])
+   692→      .then(([l, c]) => { setLeadOpts(l); setClientOpts(c); });
+   693→  }, []);
+   694→
+   695→  const onSearchInput = (v: string) => {
+   696→    setSearch(v);
+   697→    if (debounce.current) clearTimeout(debounce.current);
+   698→    debounce.current = setTimeout(() => setQuery(v), 300);
+   699→  };
+   700→
+   701→  const openCreate = () => {
+   702→    setEditingId(null);
+   703→    setForm({
+   704→      title: "", leadId: "", clientId: "", problem: "", solution: "", scope: "",
+   705→      deliverables: "", timeline: "", validUntil: "", currency: "EGP",
+   706→      discountAmount: "0", taxPercent: "0", paymentTerms: "", revisionPolicy: "",
+   707→      maintenanceTerms: "", terms: "", notes: "",
+   708→    });
+   709→    setItems([{ description: "", quantity: "1", unitPrice: "0" }]);
+   710→    setBuilderOpen(true);
+   711→  };
+   712→
+   713→  const openEdit = async (row: ProposalListRow) => {
+   714→    try {
+   715→      const d = await api.get<ProposalDetail>(`/api/proposals/${row.id}`);
+   716→      setEditingId(row.id);
+   717→      setForm({
+   718→        title: d.title, leadId: d.leadId ?? "", clientId: d.clientId ?? "",
+   719→        problem: d.problem ?? "", solution: d.solution ?? "", scope: d.scope ?? "",
+   720→        deliverables: parseDeliverables(d.deliverables).join("\n"),
+   721→        timeline: d.timeline ?? "",
+   722→        validUntil: d.validUntil ? toDateInput(d.validUntil) : "",
+   723→        currency: d.currency, discountAmount: String(d.discountAmount), taxPercent: String(d.taxPercent),
+   724→        paymentTerms: d.paymentTerms ?? "", revisionPolicy: d.revisionPolicy ?? "",
+   725→        maintenanceTerms: d.maintenanceTerms ?? "", terms: d.terms ?? "", notes: d.notes ?? "",
+   726→      });
+   727→      setItems(
+   728→        d.items.length > 0
+   729→          ? d.items.map((i) => ({ description: i.description, quantity: String(i.quantity), unitPrice: String(i.unitPrice) }))
+   730→          : [{ description: "", quantity: "1", unitPrice: "0" }]
+   731→      );
+   732→      setBuilderOpen(true);
+   733→    } catch (e) {
+   734→      toast({ title: "Could not load proposal", description: e instanceof Error ? e.message : undefined });
+   735→    }
+   736→  };
+   737→
+   738→  const submitBuilder = async () => {
+   739→    if (form.title.trim().length < 2) return toast({ title: "Title is required" });
+   740→    const cleaned = items.filter((i) => i.description.trim());
+   741→    if (cleaned.length === 0) return toast({ title: "Add at least one item with a description" });
+   742→    for (const i of cleaned) {
+   743→      if (num(i.quantity) <= 0) return toast({ title: `Quantity for "${i.description}" must be greater than 0` });
+   744→      if (num(i.unitPrice) < 0) return toast({ title: `Unit price for "${i.description}" cannot be negative` });
+   745→    }
+   746→    setSaving(true);
+   747→    try {
+   748→      const payload = {
+   749→        title: form.title.trim(),
+   750→        leadId: form.leadId || null,
+   751→        clientId: form.clientId || null,
+   752→        problem: form.problem || null,
+   753→        solution: form.solution || null,
+   754→        scope: form.scope || null,
+   755→        timeline: form.timeline || null,
+   756→        deliverables: form.deliverables.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
+   757→        validUntil: form.validUntil || null,
+   758→        currency: form.currency,
+   759→        discountAmount: num(form.discountAmount),
+   760→        taxPercent: num(form.taxPercent),
+   761→        paymentTerms: form.paymentTerms || null,
+   762→        revisionPolicy: form.revisionPolicy || null,
+   763→        maintenanceTerms: form.maintenanceTerms || null,
+   764→        terms: form.terms || null,
+   765→        notes: form.notes || null,
+   766→        items: cleaned.map((i) => ({ description: i.description.trim(), quantity: num(i.quantity), unitPrice: num(i.unitPrice) })),
+   767→      };
+   768→      if (editingId) {
+   769→        await api.patch(`/api/proposals/${editingId}`, payload);
+   770→        toast({ title: "Proposal updated" });
+   771→      } else {
+   772→        await api.post("/api/proposals", payload);
+   773→        toast({ title: "Proposal created as draft" });
+   774→      }
+   775→      setBuilderOpen(false);
+   776→      load();
+   777→    } catch (e) {
+   778→      toast({ title: "Save failed", description: e instanceof Error ? e.message : undefined });
+   779→    } finally {
+   780→      setSaving(false);
+   781→    }
+   782→  };
+   783→
+   784→  const confirmDelete = async () => {
+   785→    if (!deleting) return;
+   786→    try {
+   787→      await api.delete(`/api/proposals/${deleting.id}`);
+   788→      toast({ title: "Draft deleted" });
+   789→      setDeleting(null);
+   790→      if (detailId === deleting.id) setSheetOpen(false);
+   791→      load();
+   792→    } catch (e) {
+   793→      toast({ title: "Delete failed", description: e instanceof Error ? e.message : undefined });
+   794→    }
+   795→  };
+   796→
+   797→  const totals = previewTotals(items, num(form.discountAmount), num(form.taxPercent));
+   798→  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+   799→
+   800→  return (
+   801→    <div>
+   802→      <PageHeader
+   803→        title="Proposals"
+   804→        description="Build priced proposals with line items, terms and a full Draft → Sent → Accepted lifecycle."
+   805→        actions={canCreate && <Button onClick={openCreate}><Plus className="w-4 h-4 mr-2" /> New Proposal</Button>}
+   806→      />
+   807→
+   808→      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+   809→        <Input placeholder="Search number or title…" value={search} onChange={(e) => onSearchInput(e.target.value)} className="sm:max-w-xs" />
+   810→        <Select value={statusFilter} onValueChange={setStatusFilter}>
+   811→          <SelectTrigger className="sm:w-44"><SelectValue /></SelectTrigger>
+   812→          <SelectContent>
+   813→            <SelectItem value="ALL">All statuses</SelectItem>
+   814→            <SelectItem value="DRAFT">Draft</SelectItem>
+   815→            <SelectItem value="SENT">Sent</SelectItem>
+   816→            <SelectItem value="VIEWED">Viewed</SelectItem>
+   817→            <SelectItem value="ACCEPTED">Accepted</SelectItem>
+   818→            <SelectItem value="REJECTED">Rejected</SelectItem>
+   819→            <SelectItem value="EXPIRED">Expired</SelectItem>
+   820→          </SelectContent>
+   821→        </Select>
+   822→      </div>
+   823→
+   824→      {loading ? (
+   825→        <ListSkeleton />
+   826→      ) : error ? (
+   827→        <ErrorState onRetry={() => load()} />
+   828→      ) : total === 0 ? (
+   829→        <EmptyState
+   830→          icon={<FileText className="w-5 h-5" />}
+   831→          title={query || statusFilter !== "ALL" ? "No proposals match your filters" : "No proposals yet"}
+   832→          description={query || statusFilter !== "ALL" ? "Try adjusting the search or status filter." : "Build your first proposal with priced line items and terms."}
+   833→          action={canCreate && !(query || statusFilter !== "ALL") ? <Button size="sm" onClick={openCreate}><Plus className="w-4 h-4 mr-2" /> New Proposal</Button> : undefined}
+   834→        />
+   835→      ) : (
+   836→        <div className="apex-panel overflow-x-auto">
+   837→          <table className="w-full text-sm">
+   838→            <thead>
+   839→              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+   840→                <th className="px-4 py-3 font-medium">Proposal #</th>
+   841→                <th className="px-4 py-3 font-medium">Title</th>
+   842→                <th className="px-4 py-3 font-medium hidden lg:table-cell">Lead / Client</th>
+   843→                <th className="px-4 py-3 font-medium text-right">Total</th>
+   844→                <th className="px-4 py-3 font-medium hidden md:table-cell">Status</th>
+   845→                <th className="px-4 py-3 font-medium hidden xl:table-cell">Sent</th>
+   846→                <th className="px-4 py-3 font-medium hidden xl:table-cell">Valid until</th>
+   847→                <th className="px-4 py-3 font-medium text-right">Actions</th>
+   848→              </tr>
+   849→            </thead>
+   850→            <tbody className="divide-y divide-border">
+   851→              {rows.map((r) => {
+   852→                const expired = r.validUntil ? new Date(r.validUntil) < new Date() && ACTIVE_STATUSES.includes(r.status) : false;
+   853→                return (
+   854→                  <tr key={r.id} className="hover:bg-accent/40 transition-colors">
+   855→                    <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{r.proposalNumber}</td>
+   856→                    <td className="px-4 py-3">
+   857→                      <button className="text-left font-medium hover:text-primary transition-colors" onClick={() => { setDetailId(r.id); setSheetOpen(true); }}>
+   858→                        {r.title}
+   859→                      </button>
+   860→                      <p className="text-[11px] text-muted-foreground mt-0.5 lg:hidden">{r.lead?.companyName ?? r.client?.companyName ?? "Unlinked"}</p>
+   861→                    </td>
+   862→                    <td className="px-4 py-3 hidden lg:table-cell text-muted-foreground">{r.lead?.companyName ?? r.client?.companyName ?? "Unlinked"}</td>
+   863→                    <td className="px-4 py-3 text-right font-medium tabular-nums whitespace-nowrap">{formatCurrency(r.total, r.currency)}</td>
+   864→                    <td className="px-4 py-3 hidden md:table-cell"><StatusBadge status={r.status} /></td>
+   865→                    <td className="px-4 py-3 hidden xl:table-cell text-muted-foreground whitespace-nowrap">{formatDate(r.sentAt)}</td>
+   866→                    <td className={cn("px-4 py-3 hidden xl:table-cell whitespace-nowrap", expired ? "text-rose-400" : "text-muted-foreground")}>
+   867→                      {formatDate(r.validUntil)}{expired && " · expired"}
+   868→                    </td>
+   869→                    <td className="px-4 py-3 text-right">
+   870→                      <div className="inline-flex items-center gap-1">
+   871→                        <Button variant="ghost" size="icon" className="h-8 w-8" title="View" onClick={() => { setDetailId(r.id); setSheetOpen(true); }}>
+   872→                          <Eye className="w-3.5 h-3.5" />
+   873→                        </Button>
+   874→                        {canEdit && !["ACCEPTED", "REJECTED"].includes(r.status) && (
+   875→                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(r)}>
+   876→                            <Pencil className="w-3.5 h-3.5" />
+   877→                          </Button>
+   878→                        )}
+   879→                        {canDelete && r.status === "DRAFT" && (
+   880→                          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" title="Delete draft" onClick={() => setDeleting(r)}>
+   881→                            <Trash2 className="w-3.5 h-3.5" />
+   882→                          </Button>
+   883→                        )}
+   884→                        {!canEdit && !canDelete && (
+   885→                          <DropdownMenu>
+   886→                            <DropdownMenuTrigger asChild>
+   887→                              <Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="w-4 h-4" /></Button>
+   888→                            </DropdownMenuTrigger>
+   889→                            <DropdownMenuContent align="end"><DropdownMenuItem disabled>No actions available</DropdownMenuItem></DropdownMenuContent>
+   890→                          </DropdownMenu>
+   891→                        )}
+   892→                      </div>
+   893→                    </td>
+   894→                  </tr>
+   895→                );
+   896→              })}
+   897→            </tbody>
+   898→          </table>
+   899→        </div>
+   900→      )}
+   901→
+   902→      {totalPages > 1 && (
+   903→        <div className="flex items-center justify-between text-sm mt-4">
+   904→          <p className="text-muted-foreground">Page {page} of {totalPages} · {total} proposals</p>
+   905→          <div className="flex gap-2">
+   906→            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => load({ page: page - 1 })}>Previous</Button>
+   907→            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => load({ page: page + 1 })}>Next</Button>
+   908→          </div>
+   909→        </div>
+   910→      )}
+   911→
+   912→      {/* Builder dialog */}
+   913→      <Dialog open={builderOpen} onOpenChange={setBuilderOpen}>
+   914→        <DialogContent className="sm:max-w-3xl">
+   915→          <DialogHeader>
+   916→            <DialogTitle>{editingId ? "Edit proposal" : "New proposal"}</DialogTitle>
+   917→            <DialogDescription>Totals are always recalculated on the server from the line items below.</DialogDescription>
+   918→          </DialogHeader>
+   919→          <div className="max-h-[70vh] overflow-y-auto apex-scroll pr-1 space-y-5">
+   920→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   921→              <Field label="Title" required>
+   922→                <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Nile Trading — E-commerce Platform" />
+   923→              </Field>
+   924→              <div className="grid grid-cols-2 gap-3">
+   925→                <Field label="Currency">
+   926→                  <Select value={form.currency} onValueChange={(v) => setForm({ ...form, currency: v })}>
+   927→                    <SelectTrigger><SelectValue /></SelectTrigger>
+   928→                    <SelectContent>
+   929→                      <SelectItem value="EGP">EGP</SelectItem>
+   930→                      <SelectItem value="USD">USD</SelectItem>
+   931→                      <SelectItem value="SAR">SAR</SelectItem>
+   932→                    </SelectContent>
+   933→                  </Select>
+   934→                </Field>
+   935→                <Field label="Valid until">
+   936→                  <Input type="date" value={form.validUntil} onChange={(e) => setForm({ ...form, validUntil: e.target.value })} />
+   937→                </Field>
+   938→              </div>
+   939→            </div>
+   940→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   941→              {leadOpts.length > 0 ? (
+   942→                <Field label="Linked lead">
+   943→                  <Select value={form.leadId || "NONE"} onValueChange={(v) => setForm({ ...form, leadId: v === "NONE" ? "" : v, clientId: "" })}>
+   944→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   945→                    <SelectContent className="max-h-60">
+   946→                      <SelectItem value="NONE">None</SelectItem>
+   947→                      {leadOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   948→                    </SelectContent>
+   949→                  </Select>
+   950→                </Field>
+   951→              ) : (
+   952→                <Field label="Linked lead" hint="Lead list unavailable — the proposal will be unlinked">
+   953→                  <Input value={form.leadId} disabled placeholder="Unavailable without leads.view" />
+   954→                </Field>
+   955→              )}
+   956→              {clientOpts.length > 0 ? (
+   957→                <Field label="Linked client">
+   958→                  <Select value={form.clientId || "NONE"} onValueChange={(v) => setForm({ ...form, clientId: v === "NONE" ? "" : v, leadId: "" })}>
+   959→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   960→                    <SelectContent className="max-h-60">
+   961→                      <SelectItem value="NONE">None</SelectItem>
+   962→                      {clientOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   963→                    </SelectContent>
+   964→                  </Select>
+   965→                </Field>
+   966→              ) : (
+   967→                <Field label="Linked client" hint="Client list unavailable — the proposal will be unlinked">
+   968→                  <Input value={form.clientId} disabled placeholder="Unavailable without clients.view" />
+   969→                </Field>
+   970→              )}
+   971→            </div>
+   972→
+   973→            <div>
+   974→              <p className="text-xs font-medium text-muted-foreground mb-2">Line items</p>
+   975→              <ItemsEditor items={items} onChange={setItems} currency={form.currency} />
+   976→              <div className="mt-3 rounded-lg border border-border bg-secondary/30 p-4">
+   977→                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   978→                  <Field label="Discount amount">
+   979→                    <Input type="number" min={0} step={0.01} value={form.discountAmount} onChange={(e) => setForm({ ...form, discountAmount: e.target.value })} />
+   980→                  </Field>
+   981→                  <Field label="Tax percent">
+   982→                    <Input type="number" min={0} max={100} step={0.01} value={form.taxPercent} onChange={(e) => setForm({ ...form, taxPercent: e.target.value })} />
+   983→                  </Field>
+   984→                </div>
+   985→                <Separator className="my-3" />
+   986→                <div className="space-y-1.5 text-sm">
+   987→                  <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="tabular-nums">{formatCurrency(totals.subtotal, form.currency)}</span></div>
+   988→                  <div className="flex justify-between"><span className="text-muted-foreground">Tax ({num(form.taxPercent)}%)</span><span className="tabular-nums">{formatCurrency(totals.tax, form.currency)}</span></div>
+   989→                  <div className="flex justify-between font-semibold"><span>Total</span><span className="tabular-nums text-primary">{formatCurrency(totals.total, form.currency)}</span></div>
+   990→                </div>
+   991→              </div>
+   992→            </div>
+   993→
+   994→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   995→              <Field label="Problem"><Textarea rows={2} value={form.problem} onChange={(e) => setForm({ ...form, problem: e.target.value })} placeholder="What the client is struggling with" /></Field>
+   996→              <Field label="Solution"><Textarea rows={2} value={form.solution} onChange={(e) => setForm({ ...form, solution: e.target.value })} placeholder="How APEX solves it" /></Field>
+   997→            </div>
+   998→            <Field label="Scope"><Textarea rows={2} value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value })} placeholder="What is included and what is not" /></Field>
+   999→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+  1000→              <Field label="Deliverables" hint="Comma or newline separated">
+  1001→                <Textarea rows={2} value={form.deliverables} onChange={(e) => setForm({ ...form, deliverables: e.target.value })} placeholder="5 pages design, CMS setup, 1 month support" />
+  1002→              </Field>
+  1003→              <Field label="Timeline"><Textarea rows={2} value={form.timeline} onChange={(e) => setForm({ ...form, timeline: e.target.value })} placeholder="e.g. 4 weeks from kickoff" /></Field>
+  1004→            </div>
+  1005→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+  1006→              <Field label="Payment terms"><Textarea rows={2} value={form.paymentTerms} onChange={(e) => setForm({ ...form, paymentTerms: e.target.value })} placeholder="e.g. 50% upfront, 50% on delivery" /></Field>
+  1007→              <Field label="Revision policy"><Textarea rows={2} value={form.revisionPolicy} onChange={(e) => setForm({ ...form, revisionPolicy: e.target.value })} placeholder="e.g. 2 revision rounds included" /></Field>
+  1008→              <Field label="Maintenance terms"><Textarea rows={2} value={form.maintenanceTerms} onChange={(e) => setForm({ ...form, maintenanceTerms: e.target.value })} placeholder="e.g. 3 months free bug fixes" /></Field>
+  1009→              <Field label="Terms"><Textarea rows={2} value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} placeholder="Validity, ownership, confidentiality…" /></Field>
+  1010→            </div>
+  1011→            <Field label="Internal notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Notes the client will never see" /></Field>
+  1012→          </div>
+  1013→          <DialogFooter>
+  1014→            <Button variant="outline" onClick={() => setBuilderOpen(false)}>Cancel</Button>
+  1015→            <Button onClick={submitBuilder} disabled={saving}>
+  1016→              {saving ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : null}
+  1017→              {editingId ? "Save changes" : "Create proposal"}
+  1018→            </Button>
+  1019→          </DialogFooter>
+  1020→        </DialogContent>
+  1021→      </Dialog>
+  1022→
+  1023→      {/* Detail sheet */}
+  1024→      <ProposalDetailSheet
+  1025→        id={detailId}
+  1026→        open={sheetOpen}
+  1027→        onOpenChange={setSheetOpen}
+  1028→        onChanged={() => load()}
+  1029→        canEdit={canEdit}
+  1030→        canDelete={canDelete}
+  1031→        onDeleteRequest={(row) => setDeleting(row)}
+  1032→        onConvert={(p) => { setConvertTarget(p); setConvertOpen(true); }}
+  1033→      />
+  1034→
+  1035→      {/* Convert dialog */}
+  1036→      <ConvertDialog
+  1037→        proposal={convertTarget}
+  1038→        open={convertOpen}
+  1039→        onClose={() => { setConvertOpen(false); setConvertTarget(null); setSheetOpen(false); load(); }}
+  1040→        onConverted={() => load()}
+  1041→        navigate={navigate}
+  1042→      />
+  1043→
+  1044→      {/* Delete confirm */}
+  1045→      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
+  1046→        <AlertDialogContent>
+  1047→          <AlertDialogHeader>
+  1048→            <AlertDialogTitle>Delete this draft?</AlertDialogTitle>
+  1049→            <AlertDialogDescription>
+  1050→              {deleting ? `${deleting.proposalNumber} — ${deleting.title}` : ""} will be permanently removed. Only drafts can be deleted.
+  1051→            </AlertDialogDescription>
+  1052→          </AlertDialogHeader>
+  1053→          <AlertDialogFooter>
+  1054→            <AlertDialogCancel>Keep draft</AlertDialogCancel>
+  1055→            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={confirmDelete}>Delete</AlertDialogAction>
+  1056→          </AlertDialogFooter>
+  1057→        </AlertDialogContent>
+  1058→      </AlertDialog>
+  1059→    </div>
+  1060→  );
+  1061→}
+  1062→

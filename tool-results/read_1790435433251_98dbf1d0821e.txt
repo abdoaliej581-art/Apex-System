@@ -1,0 +1,566 @@
+   901→              )}
+   902→            </Field>
+   903→            <Field label="Priority">
+   904→              <Select value={priority} onValueChange={setPriority}>
+   905→                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   906→                <SelectContent>
+   907→                  {PRIORITIES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+   908→                </SelectContent>
+   909→              </Select>
+   910→            </Field>
+   911→          </div>
+   912→          <div className="grid grid-cols-2 gap-3">
+   913→            <Field label="Due date">
+   914→              <Input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="h-9" />
+   915→            </Field>
+   916→            <Field label="Estimated hours">
+   917→              <Input type="number" min="0" step="0.5" value={estimatedHours} onChange={(e) => setEstimatedHours(e.target.value)} className="h-9" placeholder="0" />
+   918→            </Field>
+   919→          </div>
+   920→          <Field label="Labels" hint="Comma separated">
+   921→            <Input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="e.g. frontend, urgent" />
+   922→          </Field>
+   923→        </div>
+   924→        <DialogFooter>
+   925→          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   926→          <Button disabled={!title.trim() || saving} onClick={() => void submit()}>
+   927→            {saving ? "Creating…" : "Create task"}
+   928→          </Button>
+   929→        </DialogFooter>
+   930→      </DialogContent>
+   931→    </Dialog>
+   932→  );
+   933→}
+   934→
+   935→// ============================= Tasks View =============================
+   936→
+   937→export function TasksView({ navigate }: { navigate: (p: string) => void }) {
+   938→  const { data: session } = useSession();
+   939→  const me = session?.user;
+   940→  const { toast } = useToast();
+   941→
+   942→  const [tab, setTab] = useState<"kanban" | "list" | "mine">("kanban");
+   943→  const [tasks, setTasks] = useState<TaskItem[]>([]);
+   944→  const [total, setTotal] = useState(0);
+   945→  const [page, setPage] = useState(1);
+   946→  const pageSize = 10;
+   947→  const [loading, setLoading] = useState(true);
+   948→  const [error, setError] = useState(false);
+   949→  const [reloadKey, setReloadKey] = useState(0);
+   950→
+   951→  const [filters, setFilters] = useState({
+   952→    q: "", projectId: "all", assigneeId: "all", status: "all", priority: "all", dueFrom: "", dueTo: "",
+   953→  });
+   954→  const [searchDraft, setSearchDraft] = useState("");
+   955→
+   956→  const [projectsList, setProjectsList] = useState<ProjectOption[]>([]);
+   957→  const [teamList, setTeamList] = useState<MiniUser[]>([]);
+   958→  const [teamUnavailable, setTeamUnavailable] = useState(false);
+   959→
+   960→  const [detailId, setDetailId] = useState<string | null>(null);
+   961→  const [detailOpen, setDetailOpen] = useState(false);
+   962→  const [newOpen, setNewOpen] = useState(false);
+   963→
+   964→  const [activeTask, setActiveTask] = useState<TaskItem | null>(null);
+   965→  const tasksRef = useRef<TaskItem[]>([]);
+   966→  tasksRef.current = tasks;
+   967→
+   968→  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+   969→
+   970→  const canCreate = !!me?.permissions?.includes("tasks.create");
+   971→  const canAssign = !!me?.permissions?.includes("tasks.assign");
+   972→
+   973→  // Lookup data for selects (degrade silently when permission missing)
+   974→  useEffect(() => {
+   975→    api.get<Paged<ProjectOption>>("/api/projects?pageSize=100")
+   976→      .then((d) => setProjectsList(d.items.map((p) => ({ id: p.id, name: p.name }))))
+   977→      .catch(() => setProjectsList([]));
+   978→    api.get<{ team: TeamOption[] }>("/api/team")
+   979→      .then((d) => setTeamList(d.team.map((m) => ({ id: m.id, name: m.name, avatarColor: m.avatarColor }))))
+   980→      .catch(() => setTeamUnavailable(true));
+   981→  }, []);
+   982→
+   983→  // Main data fetch — query built per tab
+   984→  useEffect(() => {
+   985→    let cancelled = false;
+   986→    (async () => {
+   987→      setLoading(true);
+   988→      setError(false);
+   989→      try {
+   990→        const params: Record<string, string | number> = {};
+   991→        if (tab === "kanban") {
+   992→          params.pageSize = 100;
+   993→          if (filters.q) params.q = filters.q;
+   994→          if (filters.projectId !== "all") params.projectId = filters.projectId;
+   995→          if (filters.priority !== "all") params.priority = filters.priority;
+   996→        } else if (tab === "list") {
+   997→          params.page = page;
+   998→          params.pageSize = pageSize;
+   999→          if (filters.q) params.q = filters.q;
+  1000→          if (filters.projectId !== "all") params.projectId = filters.projectId;
+  1001→          if (filters.assigneeId !== "all") params.assigneeId = filters.assigneeId;
+  1002→          if (filters.status !== "all") params.status = filters.status;
+  1003→          if (filters.priority !== "all") params.priority = filters.priority;
+  1004→          if (filters.dueFrom) params.dueFrom = new Date(`${filters.dueFrom}T00:00:00Z`).toISOString();
+  1005→          if (filters.dueTo) params.dueTo = new Date(`${filters.dueTo}T23:59:59Z`).toISOString();
+  1006→        } else {
+  1007→          params.view = "my";
+  1008→          params.pageSize = 100;
+  1009→        }
+  1010→        const data = await api.get<Paged<TaskItem>>(`/api/tasks${qs(params)}`);
+  1011→        if (!cancelled) {
+  1012→          setTasks(data.items);
+  1013→          setTotal(data.total);
+  1014→        }
+  1015→      } catch (e) {
+  1016→        if (!cancelled) {
+  1017→          setError(true);
+  1018→          if (e instanceof ApiClientError && e.status === 403) {
+  1019→            toast({ title: "Access denied", description: "You do not have permission to view tasks.", variant: "destructive" });
+  1020→          }
+  1021→        }
+  1022→      } finally {
+  1023→        if (!cancelled) setLoading(false);
+  1024→      }
+  1025→    })();
+  1026→    return () => { cancelled = true; };
+  1027→  }, [tab, page, filters, reloadKey, toast]);
+  1028→
+  1029→  const updateFilters = useCallback((patch: Partial<typeof filters>) => {
+  1030→    setFilters((f) => ({ ...f, ...patch }));
+  1031→    setPage(1);
+  1032→  }, []);
+  1033→
+  1034→  const openTask = useCallback((t: TaskItem) => {
+  1035→    setDetailId(t.id);
+  1036→    setDetailOpen(true);
+  1037→  }, []);
+  1038→
+  1039→  const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
+  1040→
+  1041→  // ---- Kanban move (optimistic) ----
+  1042→  const moveTask = useCallback(async (taskId: string, status: string) => {
+  1043→    const task = tasksRef.current.find((t) => t.id === taskId);
+  1044→    if (!task || task.status === status) return;
+  1045→    const prev = tasksRef.current;
+  1046→    setTasks((list) => list.map((t) => (t.id === taskId ? { ...t, status } : t)));
+  1047→    try {
+  1048→      const d = await api.patch<{ task: TaskItem }>(`/api/tasks/${taskId}`, { status });
+  1049→      setTasks((list) => list.map((t) => (t.id === taskId ? { ...t, ...d.task } : t)));
+  1050→      toast({ title: `Moved to ${statusLabel(status)}`, description: task.title });
+  1051→    } catch (e) {
+  1052→      setTasks(prev);
+  1053→      toast({
+  1054→        title: "Could not move task",
+  1055→        description: e instanceof ApiClientError ? e.message : "Please try again.",
+  1056→        variant: "destructive",
+  1057→      });
+  1058→    }
+  1059→  }, [toast]);
+  1060→
+  1061→  const onDragStart = useCallback((e: DragStartEvent) => {
+  1062→    setActiveTask(tasksRef.current.find((t) => t.id === e.active.id) ?? null);
+  1063→  }, []);
+  1064→
+  1065→  const onDragEnd = useCallback((e: DragEndEvent) => {
+  1066→    setActiveTask(null);
+  1067→    const overId = e.over?.id;
+  1068→    if (!overId || typeof overId !== "string") return;
+  1069→    if (!(TASK_STATUSES as readonly string[]).includes(overId)) return;
+  1070→    void moveTask(String(e.active.id), overId);
+  1071→  }, [moveTask]);
+  1072→
+  1073→  // ---- My Tasks: complete (optimistic) ----
+  1074→  const completeTask = useCallback(async (taskId: string) => {
+  1075→    const prev = tasksRef.current;
+  1076→    setTasks((list) => list.filter((t) => t.id !== taskId));
+  1077→    try {
+  1078→      await api.patch(`/api/tasks/${taskId}`, { status: "DONE" });
+  1079→      toast({ title: "Task completed 🎉" });
+  1080→      refresh();
+  1081→    } catch (e) {
+  1082→      setTasks(prev);
+  1083→      toast({
+  1084→        title: "Could not complete task",
+  1085→        description: e instanceof ApiClientError ? e.message : "Please try again.",
+  1086→        variant: "destructive",
+  1087→      });
+  1088→    }
+  1089→  }, [toast, refresh]);
+  1090→
+  1091→  const kanbanGroups = useMemo(() => {
+  1092→    const map = new Map<string, TaskItem[]>();
+  1093→    TASK_STATUSES.forEach((s) => map.set(s, []));
+  1094→    tasks.forEach((t) => {
+  1095→      if ((TASK_STATUSES as readonly string[]).includes(t.status)) map.get(t.status)?.push(t);
+  1096→      else map.get("BACKLOG")?.push(t);
+  1097→    });
+  1098→    return map;
+  1099→  }, [tasks]);
+  1100→
+  1101→  const myGroups = useMemo(() => {
+  1102→    const today = new Date();
+  1103→    today.setHours(0, 0, 0, 0);
+  1104→    const open = tasks.filter((t) => t.status !== "DONE");
+  1105→    const groups: { key: string; label: string; icon: React.ReactNode; items: TaskItem[] }[] = [
+  1106→      { key: "overdue", label: "Overdue", icon: <Flag className="w-3.5 h-3.5" />, items: [] },
+  1107→      { key: "today", label: "Today", icon: <Clock className="w-3.5 h-3.5" />, items: [] },
+  1108→      { key: "upcoming", label: "Upcoming", icon: <CalendarDays className="w-3.5 h-3.5" />, items: [] },
+  1109→      { key: "nodate", label: "No due date", icon: <ListTodo className="w-3.5 h-3.5" />, items: [] },
+  1110→    ];
+  1111→    open.forEach((t) => {
+  1112→      if (!t.dueDate) { groups[3].items.push(t); return; }
+  1113→      const d = new Date(t.dueDate);
+  1114→      d.setHours(0, 0, 0, 0);
+  1115→      if (d.getTime() < today.getTime()) groups[0].items.push(t);
+  1116→      else if (d.getTime() === today.getTime()) groups[1].items.push(t);
+  1117→      else groups[2].items.push(t);
+  1118→    });
+  1119→    return groups;
+  1120→  }, [tasks]);
+  1121→
+  1122→  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  1123→  const hasActiveFilters = Object.values(filters).some((v) => v && v !== "all");
+  1124→
+  1125→  const projectChip = (task: TaskItem) =>
+  1126→    task.project ? (
+  1127→      <button
+  1128→        onClick={(e) => { e.stopPropagation(); navigate("projects"); }}
+  1129→        className="text-[11px] text-cyan-300/90 hover:text-cyan-200 truncate max-w-[180px] text-left"
+  1130→        title={task.project.name}
+  1131→      >
+  1132→        {task.project.name}
+  1133→      </button>
+  1134→    ) : <span className="text-[11px] text-muted-foreground">No project</span>;
+  1135→
+  1136→  return (
+  1137→    <div>
+  1138→      <PageHeader
+  1139→        title="Tasks"
+  1140→        description="Plan and execute the team's work — kanban board, filtered list and your personal focus."
+  1141→        actions={
+  1142→          canCreate ? (
+  1143→            <Button onClick={() => setNewOpen(true)}>
+  1144→              <Plus className="w-4 h-4 mr-2" /> New Task
+  1145→            </Button>
+  1146→          ) : undefined
+  1147→        }
+  1148→      />
+  1149→
+  1150→      <Tabs
+  1151→        value={tab}
+  1152→        onValueChange={(v) => { setTab(v as typeof tab); setPage(1); }}
+  1153→      >
+  1154→        <TabsList className="bg-secondary/60 mb-4">
+  1155→          <TabsTrigger value="kanban" className="text-xs sm:text-sm">Kanban</TabsTrigger>
+  1156→          <TabsTrigger value="list" className="text-xs sm:text-sm">List</TabsTrigger>
+  1157→          <TabsTrigger value="mine" className="text-xs sm:text-sm">My Tasks</TabsTrigger>
+  1158→        </TabsList>
+  1159→
+  1160→        {error ? (
+  1161→          <ErrorState message="Tasks could not be loaded." onRetry={refresh} />
+  1162→        ) : (
+  1163→          <>
+  1164→            {/* ---------------- KANBAN ---------------- */}
+  1165→            <TabsContent value="kanban" className="mt-0 focus-visible:outline-none">
+  1166→              <div className="flex flex-col sm:flex-row gap-2 mb-4">
+  1167→                <div className="relative flex-1 sm:max-w-xs">
+  1168→                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+  1169→                  <Input
+  1170→                    value={searchDraft}
+  1171→                    onChange={(e) => setSearchDraft(e.target.value)}
+  1172→                    onKeyDown={(e) => { if (e.key === "Enter") updateFilters({ q: searchDraft }); }}
+  1173→                    onBlur={() => { if (searchDraft !== filters.q) updateFilters({ q: searchDraft }); }}
+  1174→                    placeholder="Search tasks…"
+  1175→                    className="pl-9 h-9"
+  1176→                  />
+  1177→                </div>
+  1178→                <Select value={filters.projectId} onValueChange={(v) => updateFilters({ projectId: v })}>
+  1179→                  <SelectTrigger className="h-9 sm:w-52"><SelectValue placeholder="All projects" /></SelectTrigger>
+  1180→                  <SelectContent>
+  1181→                    <SelectItem value="all">All projects</SelectItem>
+  1182→                    {projectsList.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+  1183→                  </SelectContent>
+  1184→                </Select>
+  1185→                <Select value={filters.priority} onValueChange={(v) => updateFilters({ priority: v })}>
+  1186→                  <SelectTrigger className="h-9 sm:w-36"><SelectValue placeholder="Priority" /></SelectTrigger>
+  1187→                  <SelectContent>
+  1188→                    <SelectItem value="all">All priorities</SelectItem>
+  1189→                    {PRIORITIES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+  1190→                  </SelectContent>
+  1191→                </Select>
+  1192→              </div>
+  1193→
+  1194→              {loading ? (
+  1195→                <div className="flex gap-3 overflow-hidden">
+  1196→                  {TASK_STATUSES.map((s) => (
+  1197→                    <div key={s} className="w-[272px] shrink-0 space-y-2">
+  1198→                      <Skeleton className="h-9 w-full" />
+  1199→                      <Skeleton className="h-24 w-full" />
+  1200→                      <Skeleton className="h-24 w-full" />
+  1201→                    </div>
+  1202→                  ))}
+  1203→                </div>
+  1204→              ) : tasks.length === 0 ? (
+  1205→                <EmptyState
+  1206→                  icon={<ListTodo className="w-5 h-5" />}
+  1207→                  title="No tasks found"
+  1208→                  description={filters.q || filters.projectId !== "all" || filters.priority !== "all"
+  1209→                    ? "Try adjusting the filters."
+  1210→                    : canCreate
+  1211→                      ? "Create the first task to start planning the delivery."
+  1212→                      : "No tasks have been created yet."}
+  1213→                  action={canCreate ? <Button size="sm" onClick={() => setNewOpen(true)}><Plus className="w-4 h-4 mr-2" /> New Task</Button> : undefined}
+  1214→                />
+  1215→              ) : (
+  1216→                <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
+  1217→                  <div className="flex gap-3 overflow-x-auto apex-scroll pb-3 -mx-1 px-1">
+  1218→                    {TASK_STATUSES.map((s) => (
+  1219→                      <KanbanColumn
+  1220→                        key={s}
+  1221→                        status={s}
+  1222→                        tasks={kanbanGroups.get(s) ?? []}
+  1223→                        onOpenTask={openTask}
+  1224→                        onMoveTo={moveTask}
+  1225→                        onOpenProject={() => navigate("projects")}
+  1226→                      />
+  1227→                    ))}
+  1228→                  </div>
+  1229→                  <DragOverlay dropAnimation={{ duration: 180, easing: "cubic-bezier(0.2, 0, 0, 1)" }}>
+  1230→                    {activeTask ? (
+  1231→                      <div className="w-[264px] rounded-lg border border-primary/60 bg-card p-3 shadow-xl apex-glow rotate-1">
+  1232→                        <p className="text-sm font-medium line-clamp-2">{activeTask.title}</p>
+  1233→                        <p className="text-[11px] text-muted-foreground mt-1">
+  1234→                          {activeTask.project?.name ?? "Standalone"} · {statusLabel(activeTask.status)}
+  1235→                        </p>
+  1236→                      </div>
+  1237→                    ) : null}
+  1238→                  </DragOverlay>
+  1239→                </DndContext>
+  1240→              )}
+  1241→            </TabsContent>
+  1242→
+  1243→            {/* ---------------- LIST ---------------- */}
+  1244→            <TabsContent value="list" className="mt-0 focus-visible:outline-none">
+  1245→              <div className="apex-panel p-3 mb-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2">
+  1246→                <div className="relative col-span-2 sm:col-span-3 lg:col-span-2">
+  1247→                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+  1248→                  <Input
+  1249→                    value={searchDraft}
+  1250→                    onChange={(e) => setSearchDraft(e.target.value)}
+  1251→                    onKeyDown={(e) => { if (e.key === "Enter") updateFilters({ q: searchDraft }); }}
+  1252→                    placeholder="Search…"
+  1253→                    className="pl-9 h-9"
+  1254→                  />
+  1255→                </div>
+  1256→                <Select value={filters.projectId} onValueChange={(v) => updateFilters({ projectId: v })}>
+  1257→                  <SelectTrigger className="h-9"><SelectValue placeholder="Project" /></SelectTrigger>
+  1258→                  <SelectContent>
+  1259→                    <SelectItem value="all">All projects</SelectItem>
+  1260→                    {projectsList.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+  1261→                  </SelectContent>
+  1262→                </Select>
+  1263→                <Select value={filters.assigneeId} onValueChange={(v) => updateFilters({ assigneeId: v })} disabled={teamUnavailable}>
+  1264→                  <SelectTrigger className="h-9"><SelectValue placeholder="Assignee" /></SelectTrigger>
+  1265→                  <SelectContent>
+  1266→                    <SelectItem value="all">All assignees</SelectItem>
+  1267→                    {teamList.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
+  1268→                  </SelectContent>
+  1269→                </Select>
+  1270→                <Select value={filters.status} onValueChange={(v) => updateFilters({ status: v })}>
+  1271→                  <SelectTrigger className="h-9"><SelectValue placeholder="Status" /></SelectTrigger>
+  1272→                  <SelectContent>
+  1273→                    <SelectItem value="all">All statuses</SelectItem>
+  1274→                    {TASK_STATUSES.map((s) => <SelectItem key={s} value={s}>{statusLabel(s)}</SelectItem>)}
+  1275→                  </SelectContent>
+  1276→                </Select>
+  1277→                <Select value={filters.priority} onValueChange={(v) => updateFilters({ priority: v })}>
+  1278→                  <SelectTrigger className="h-9"><SelectValue placeholder="Priority" /></SelectTrigger>
+  1279→                  <SelectContent>
+  1280→                    <SelectItem value="all">All priorities</SelectItem>
+  1281→                    {PRIORITIES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+  1282→                  </SelectContent>
+  1283→                </Select>
+  1284→                <div className="flex gap-2">
+  1285→                  <Input type="date" value={filters.dueFrom} onChange={(e) => updateFilters({ dueFrom: e.target.value })} className="h-9 text-xs" title="Due from" aria-label="Due from" />
+  1286→                  <Input type="date" value={filters.dueTo} onChange={(e) => updateFilters({ dueTo: e.target.value })} className="h-9 text-xs" title="Due to" aria-label="Due to" />
+  1287→                </div>
+  1288→              </div>
+  1289→
+  1290→              {loading ? (
+  1291→                <div className="space-y-2">{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
+  1292→              ) : tasks.length === 0 ? (
+  1293→                <EmptyState
+  1294→                  icon={<ClipboardList className="w-5 h-5" />}
+  1295→                  title="No tasks match"
+  1296→                  description={hasActiveFilters ? "Try clearing some filters." : "Create a task to get started."}
+  1297→                  action={
+  1298→                    hasActiveFilters ? (
+  1299→                      <Button size="sm" variant="outline" onClick={() => { setFilters({ q: "", projectId: "all", assigneeId: "all", status: "all", priority: "all", dueFrom: "", dueTo: "" }); setSearchDraft(""); }}>
+  1300→                        Clear filters
+  1301→                      </Button>
+  1302→                    ) : undefined
+  1303→                  }
+  1304→                />
+  1305→              ) : (
+  1306→                <div className="apex-panel overflow-hidden">
+  1307→                  <div className="overflow-x-auto apex-scroll">
+  1308→                    <table className="w-full text-sm">
+  1309→                      <thead>
+  1310→                        <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+  1311→                          <th className="px-4 py-3 font-medium">Task</th>
+  1312→                          <th className="px-4 py-3 font-medium">Status</th>
+  1313→                          <th className="px-4 py-3 font-medium hidden md:table-cell">Assignee</th>
+  1314→                          <th className="px-4 py-3 font-medium">Priority</th>
+  1315→                          <th className="px-4 py-3 font-medium hidden sm:table-cell">Due</th>
+  1316→                          <th className="px-4 py-3 font-medium hidden lg:table-cell">Checklist</th>
+  1317→                        </tr>
+  1318→                      </thead>
+  1319→                      <tbody>
+  1320→                        {tasks.map((t) => {
+  1321→                          const due = dueMeta(t.dueDate);
+  1322→                          return (
+  1323→                            <tr
+  1324→                              key={t.id}
+  1325→                              onClick={() => openTask(t)}
+  1326→                              className="border-b border-border/60 last:border-0 hover:bg-accent/40 cursor-pointer transition-colors"
+  1327→                            >
+  1328→                              <td className="px-4 py-3">
+  1329→                                <p className="font-medium leading-snug line-clamp-1">{t.title}</p>
+  1330→                                <div className="mt-0.5">{projectChip(t)}</div>
+  1331→                              </td>
+  1332→                              <td className="px-4 py-3"><StatusBadge status={t.status} /></td>
+  1333→                              <td className="px-4 py-3 hidden md:table-cell">
+  1334→                                {t.assignee ? (
+  1335→                                  <span className="flex items-center gap-2">
+  1336→                                    <UserAvatar name={t.assignee.name} color={t.assignee.avatarColor} />
+  1337→                                    <span className="text-xs">{t.assignee.name}</span>
+  1338→                                  </span>
+  1339→                                ) : <span className="text-xs text-muted-foreground">Unassigned</span>}
+  1340→                              </td>
+  1341→                              <td className="px-4 py-3"><PriorityBadge priority={t.priority} /></td>
+  1342→                              <td className={cn("px-4 py-3 text-xs hidden sm:table-cell", due.cls)}>{due.text}</td>
+  1343→                              <td className="px-4 py-3 text-xs text-muted-foreground hidden lg:table-cell">
+  1344→                                {t.checklistTotal ? `${t.checklistDone ?? 0}/${t.checklistTotal}` : "—"}
+  1345→                              </td>
+  1346→                            </tr>
+  1347→                          );
+  1348→                        })}
+  1349→                      </tbody>
+  1350→                    </table>
+  1351→                  </div>
+  1352→                  <div className="flex items-center justify-between px-4 py-3 border-t border-border text-xs text-muted-foreground">
+  1353→                    <span>
+  1354→                      Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
+  1355→                    </span>
+  1356→                    <div className="flex items-center gap-2">
+  1357→                      <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+  1358→                        Previous
+  1359→                      </Button>
+  1360→                      <span>Page {page} / {totalPages}</span>
+  1361→                      <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+  1362→                        Next
+  1363→                      </Button>
+  1364→                    </div>
+  1365→                  </div>
+  1366→                </div>
+  1367→              )}
+  1368→            </TabsContent>
+  1369→
+  1370→            {/* ---------------- MY TASKS ---------------- */}
+  1371→            <TabsContent value="mine" className="mt-0 focus-visible:outline-none">
+  1372→              {loading ? (
+  1373→                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+  1374→                  {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-40 w-full" />)}
+  1375→                </div>
+  1376→              ) : tasks.filter((t) => t.status !== "DONE").length === 0 ? (
+  1377→                <EmptyState
+  1378→                  icon={<CheckSquare className="w-5 h-5" />}
+  1379→                  title="All clear!"
+  1380→                  description="You have no open tasks assigned to you. Enjoy the calm."
+  1381→                />
+  1382→              ) : (
+  1383→                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+  1384→                  {myGroups.map((g) => (
+  1385→                    <div
+  1386→                      key={g.key}
+  1387→                      className={cn(
+  1388→                        "apex-panel p-4",
+  1389→                        g.key === "overdue" && g.items.length > 0 && "border-rose-500/30",
+  1390→                        g.key === "today" && g.items.length > 0 && "border-amber-500/30",
+  1391→                      )}
+  1392→                    >
+  1393→                      <div className="flex items-center justify-between mb-3">
+  1394→                        <span className={cn(
+  1395→                          "text-xs font-semibold uppercase tracking-wide flex items-center gap-1.5",
+  1396→                          g.key === "overdue" ? "text-rose-300" : g.key === "today" ? "text-amber-300" : "text-muted-foreground",
+  1397→                        )}>
+  1398→                          {g.icon} {g.label}
+  1399→                        </span>
+  1400→                        <span className="text-xs text-muted-foreground">{g.items.length}</span>
+  1401→                      </div>
+  1402→                      {g.items.length === 0 ? (
+  1403→                        <p className="text-xs text-muted-foreground py-4 text-center">Nothing here.</p>
+  1404→                      ) : (
+  1405→                        <div className="space-y-2 max-h-96 overflow-y-auto apex-scroll pr-1">
+  1406→                          {g.items.map((t) => (
+  1407→                            <div key={t.id} className="flex items-start gap-3 p-2.5 rounded-lg border border-border/70 hover:border-primary/40 transition-colors">
+  1408→                              <Checkbox
+  1409→                                className="mt-0.5"
+  1410→                                onCheckedChange={() => void completeTask(t.id)}
+  1411→                                aria-label={`Complete ${t.title}`}
+  1412→                              />
+  1413→                              <div className="min-w-0 flex-1 cursor-pointer" onClick={() => openTask(t)}>
+  1414→                                <p className="text-sm font-medium leading-snug line-clamp-2">{t.title}</p>
+  1415→                                <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+  1416→                                  <PriorityBadge priority={t.priority} />
+  1417→                                  {t.dueDate && <span className={cn("text-[10px]", dueMeta(t.dueDate).cls)}>{dueMeta(t.dueDate).text}</span>}
+  1418→                                  {t.project && (
+  1419→                                    <span className="text-[10px] text-cyan-300/80 truncate max-w-[140px]">{t.project.name}</span>
+  1420→                                  )}
+  1421→                                </div>
+  1422→                              </div>
+  1423→                              {t.project && (
+  1424→                                <button
+  1425→                                  onClick={(e) => { e.stopPropagation(); navigate("projects"); }}
+  1426→                                  className="text-muted-foreground hover:text-primary shrink-0"
+  1427→                                  title="Open projects"
+  1428→                                  aria-label="Open projects"
+  1429→                                >
+  1430→                                  <FolderKanban className="w-3.5 h-3.5" />
+  1431→                                </button>
+  1432→                              )}
+  1433→                            </div>
+  1434→                          ))}
+  1435→                        </div>
+  1436→                      )}
+  1437→                    </div>
+  1438→                  ))}
+  1439→                </div>
+  1440→              )}
+  1441→            </TabsContent>
+  1442→          </>
+  1443→        )}
+  1444→      </Tabs>
+  1445→
+  1446→      <TaskDetailSheet
+  1447→        taskId={detailId}
+  1448→        open={detailOpen}
+  1449→        onOpenChange={setDetailOpen}
+  1450→        onChanged={refresh}
+  1451→        navigate={navigate}
+  1452→      />
+  1453→      <NewTaskDialog
+  1454→        open={newOpen}
+  1455→        onOpenChange={setNewOpen}
+  1456→        projects={projectsList}
+  1457→        team={teamList}
+  1458→        teamUnavailable={teamUnavailable}
+  1459→        canAssign={canAssign}
+  1460→        meId={me?.id}
+  1461→        onCreated={refresh}
+  1462→      />
+  1463→    </div>
+  1464→  );
+  1465→}
+  1466→

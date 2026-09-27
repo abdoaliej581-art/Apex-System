@@ -1,0 +1,783 @@
+     1→// APEX SYSTEM — Full Database Schema
+     2→// SQLite + Prisma. Statuses stored as String (configurable) and validated with zod.
+     3→
+     4→generator client {
+     5→  provider = "prisma-client-js"
+     6→}
+     7→
+     8→datasource db {
+     9→  provider = "sqlite"
+    10→  url      = env("DATABASE_URL")
+    11→}
+    12→
+    13→// ============ AUTH & TEAM ============
+    14→
+    15→model User {
+    16→  id                String    @id @default(cuid())
+    17→  email             String    @unique
+    18→  name              String
+    19→  passwordHash      String
+    20→  title             String? // job title e.g. "Frontend Developer"
+    21→  avatarColor       String    @default("#22d3ee")
+    22→  customPermissions String? // JSON array of extra permission strings
+    23→  isActive          Boolean   @default(true)
+    24→  skills            String? // JSON array
+    25→  lastLoginAt       DateTime?
+    26→  createdAt         DateTime  @default(now())
+    27→  updatedAt         DateTime  @updatedAt
+    28→
+    29→  roles             Role[]    @relation("UserRoles")
+    30→  assignedLeads     Lead[]    @relation("LeadAssignee")
+    31→  createdLeads      Lead[]    @relation("LeadCreator")
+    32→  assignedFollowUps FollowUp[] @relation("FollowUpAssignee")
+    33→  managedProjects   Project[] @relation("ProjectManager")
+    34→  projectMemberships ProjectMember[] @relation("ProjectMemberships")
+    35→  taskComments      TaskComment[]
+    36→  assignedTasks     Task[]    @relation("TaskAssignee")
+    37→  reportedTasks     Task[]    @relation("TaskReporter")
+    38→  activities        Activity[] @relation("ActivityActor")
+    39→  recordedPayments  Payment[] @relation("PaymentRecorder")
+    40→  assignedTickets   Ticket[]  @relation("TicketAssignee")
+    41→  loggedMaintenance MaintenanceLog[] @relation("MaintenanceLogger")
+    42→  notifications     Notification[]
+    43→  auditLogs         AuditLog[] @relation("AuditActor")
+    44→  authoredContent   Content[]  @relation("ContentAuthor")
+    45→  reviewedContent   Content[]  @relation("ContentReviewer")
+    46→  knowledgeArticles KnowledgeArticle[] @relation("KnowledgeAuthor")
+    47→}
+    48→
+    49→model Role {
+    50→  id          String  @id @default(cuid())
+    51→  key         String  @unique // SUPER_ADMIN, SALES...
+    52→  label       String
+    53→  description String?
+    54→  permissions String // JSON array of permission strings
+    55→  isSystem    Boolean @default(false)
+    56→  users       User[]  @relation("UserRoles")
+    57→}
+    58→
+    59→// ============ CRM ============
+    60→
+    61→model Lead {
+    62→  id               String    @id @default(cuid())
+    63→  leadNumber       String    @unique
+    64→  companyName      String
+    65→  contactName      String
+    66→  phone            String
+    67→  email            String?
+    68→  website          String?
+    69→  instagram        String?
+    70→  facebook         String?
+    71→  linkedin         String?
+    72→  industry         String?
+    73→  location         String?
+    74→  source           String    @default("OTHER")
+    75→  serviceInterest  String?
+    76→  estimatedBudget  Float?
+    77→  priority         String    @default("MEDIUM") // LOW MEDIUM HIGH URGENT
+    78→  status           String    @default("NEW") // NEW CONTACTED QUALIFIED MEETING PROPOSAL_SENT NEGOTIATION WON LOST
+    79→  notes            String?
+    80→  nextFollowUpAt   DateTime?
+    81→  lostReason       String?
+    82→  convertedClientId String?
+    83→  assignedToId     String?
+    84→  createdById      String?
+    85→  deletedAt        DateTime?
+    86→  createdAt        DateTime  @default(now())
+    87→  updatedAt        DateTime  @updatedAt
+    88→
+    89→  assignedTo User?     @relation("LeadAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+    90→  createdBy  User?     @relation("LeadCreator", fields: [createdById], references: [id], onDelete: SetNull)
+    91→  followUps  FollowUp[]
+    92→  meetings   Meeting[]
+    93→  proposals  Proposal[]
+    94→  quotations Quotation[]
+    95→
+    96→  @@index([status])
+    97→  @@index([assignedToId])
+    98→  @@index([createdAt])
+    99→  @@index([companyName])
+   100→}
+   101→
+   102→model FollowUp {
+   103→  id           String    @id @default(cuid())
+   104→  title        String
+   105→  leadId       String?
+   106→  clientId     String?
+   107→  assignedToId String?
+   108→  dueAt        DateTime
+   109→  priority     String    @default("MEDIUM")
+   110→  notes        String?
+   111→  status       String    @default("PENDING") // PENDING COMPLETED CANCELLED
+   112→  completedAt  DateTime?
+   113→  createdAt    DateTime  @default(now())
+   114→  updatedAt    DateTime  @updatedAt
+   115→
+   116→  lead       Lead?   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+   117→  client     Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   118→  assignedTo User?   @relation("FollowUpAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+   119→
+   120→  @@index([dueAt])
+   121→  @@index([status])
+   122→  @@index([assignedToId])
+   123→}
+   124→
+   125→model Client {
+   126→  id                 String    @id @default(cuid())
+   127→  clientNumber       String    @unique
+   128→  companyName        String
+   129→  industry           String?
+   130→  location           String?
+   131→  website            String?
+   132→  email              String?
+   133→  phone              String?
+   134→  instagram          String?
+   135→  facebook           String?
+   136→  linkedin           String?
+   137→  status             String    @default("ACTIVE") // ACTIVE INACTIVE ARCHIVED
+   138→  notes              String?
+   139→  convertedFromLeadId String?
+   140→  createdById        String?
+   141→  archivedAt         DateTime?
+   142→  createdAt          DateTime  @default(now())
+   143→  updatedAt          DateTime  @updatedAt
+   144→
+   145→  contacts        Contact[]
+   146→  projects        Project[]
+   147→  meetings        Meeting[]
+   148→  proposals       Proposal[]
+   149→  quotations      Quotation[]
+   150→  contracts       Contract[]
+   151→  invoices        Invoice[]
+   152→  payments        Payment[]
+   153→  tickets         Ticket[]
+   154→  maintenancePlans MaintenancePlan[]
+   155→  followUps       FollowUp[]
+   156→
+   157→  @@index([status])
+   158→  @@index([companyName])
+   159→  @@index([createdAt])
+   160→}
+   161→
+   162→model Contact {
+   163→  id              String   @id @default(cuid())
+   164→  clientId        String
+   165→  name            String
+   166→  position        String?
+   167→  email           String?
+   168→  phone           String?
+   169→  preferredMethod String? // EMAIL PHONE WHATSAPP
+   170→  isPrimary       Boolean  @default(false)
+   171→  notes           String?
+   172→  createdAt       DateTime @default(now())
+   173→  updatedAt       DateTime @updatedAt
+   174→
+   175→  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   176→
+   177→  @@index([clientId])
+   178→}
+   179→
+   180→// Polymorphic activity timeline: entityType = LEAD | CLIENT | PROJECT | TASK | TICKET | INVOICE | PROPOSAL | CONTRACT | PAYMENT
+   181→model Activity {
+   182→  id          String   @id @default(cuid())
+   183→  type        String // CREATED UPDATED STATUS_CHANGED CALL WHATSAPP MEETING PROPOSAL PROJECT INVOICE PAYMENT TICKET NOTE
+   184→  actorId     String?
+   185→  actorName   String?
+   186→  entityType  String
+   187→  entityId    String
+   188→  title       String
+   189→  description String?
+   190→  metadata    String? // JSON
+   191→  createdAt   DateTime @default(now())
+   192→
+   193→  actor User? @relation("ActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+   194→
+   195→  @@index([entityType, entityId])
+   196→  @@index([createdAt])
+   197→}
+   198→
+   199→// ============ SALES ============
+   200→
+   201→model Meeting {
+   202→  id          String    @id @default(cuid())
+   203→  title       String
+   204→  leadId      String?
+   205→  clientId    String?
+   206→  projectId   String?
+   207→  date        DateTime
+   208→  startTime   String
+   209→  endTime     String
+   210→  location    String?
+   211→  meetingLink String?
+   212→  notes       String?
+   213→  outcome     String?
+   214→  nextAction  String?
+   215→  status      String    @default("SCHEDULED") // SCHEDULED COMPLETED CANCELLED RESCHEDULED
+   216→  participants String?  // JSON array of user ids
+   217→  createdById String?
+   218→  createdAt   DateTime  @default(now())
+   219→  updatedAt   DateTime  @updatedAt
+   220→
+   221→  lead    Lead?   @relation(fields: [leadId], references: [id], onDelete: SetNull)
+   222→  client  Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+   223→  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+   224→
+   225→  @@index([date])
+   226→  @@index([status])
+   227→}
+   228→
+   229→model Proposal {
+   230→  id               String    @id @default(cuid())
+   231→  proposalNumber   String    @unique
+   232→  leadId           String?
+   233→  clientId         String?
+   234→  title            String
+   235→  problem          String?
+   236→  solution         String?
+   237→  scope            String?
+   238→  timeline         String?
+   239→  deliverables     String? // JSON array
+   240→  validUntil       DateTime?
+   241→  status           String    @default("DRAFT") // DRAFT SENT VIEWED ACCEPTED REJECTED EXPIRED
+   242→  currency         String    @default("EGP")
+   243→  subtotal         Float     @default(0)
+   244→  discountAmount   Float     @default(0)
+   245→  taxPercent       Float     @default(0)
+   246→  total            Float     @default(0)
+   247→  paymentTerms     String?
+   248→  revisionPolicy   String?
+   249→  maintenanceTerms String?
+   250→  terms            String?
+   251→  notes            String?
+   252→  sentAt           DateTime?
+   253→  respondedAt      DateTime?
+   254→  createdAt        DateTime  @default(now())
+   255→  updatedAt        DateTime  @updatedAt
+   256→
+   257→  lead     Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+   258→  client   Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
+   259→  items    ProposalItem[]
+   260→  contracts Contract[]
+   261→
+   262→  @@index([status])
+   263→  @@index([createdAt])
+   264→}
+   265→
+   266→model ProposalItem {
+   267→  id          String @id @default(cuid())
+   268→  proposalId  String
+   269→  description String
+   270→  quantity    Float  @default(1)
+   271→  unitPrice   Float  @default(0)
+   272→  total       Float  @default(0)
+   273→  order       Int    @default(0)
+   274→
+   275→  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+   276→
+   277→  @@index([proposalId])
+   278→}
+   279→
+   280→model Quotation {
+   281→  id             String    @id @default(cuid())
+   282→  quotationNumber String   @unique
+   283→  leadId         String?
+   284→  clientId       String?
+   285→  title          String
+   286→  currency       String    @default("EGP")
+   287→  subtotal       Float     @default(0)
+   288→  discountAmount Float     @default(0)
+   289→  taxPercent     Float     @default(0)
+   290→  total          Float     @default(0)
+   291→  paymentTerms   String?
+   292→  validUntil     DateTime?
+   293→  status         String    @default("DRAFT") // DRAFT SENT ACCEPTED REJECTED EXPIRED
+   294→  notes          String?
+   295→  createdAt      DateTime  @default(now())
+   296→  updatedAt      DateTime  @updatedAt
+   297→
+   298→  lead   Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+   299→  client Client?         @relation(fields: [clientId], references: [id], onDelete: SetNull)
+   300→  items  QuotationItem[]
+   301→
+   302→  @@index([status])
+   303→}
+   304→
+   305→model QuotationItem {
+   306→  id          String @id @default(cuid())
+   307→  quotationId String
+   308→  description String
+   309→  quantity    Float  @default(1)
+   310→  unitPrice   Float  @default(0)
+   311→  total       Float  @default(0)
+   312→  order       Int    @default(0)
+   313→
+   314→  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+   315→
+   316→  @@index([quotationId])
+   317→}
+   318→
+   319→model Contract {
+   320→  id               String    @id @default(cuid())
+   321→  contractNumber   String    @unique
+   322→  clientId         String
+   323→  projectId        String?
+   324→  proposalId       String?
+   325→  title            String
+   326→  scope            String?
+   327→  deliverables     String?
+   328→  timeline         String?
+   329→  paymentTerms     String?
+   330→  revisionTerms    String?
+   331→  maintenanceTerms String?
+   332→  startDate        DateTime?
+   333→  endDate          DateTime?
+   334→  status           String    @default("DRAFT") // DRAFT SENT SIGNED ACTIVE COMPLETED CANCELLED
+   335→  signedDate       DateTime?
+   336→  documentUrl      String?
+   337→  notes            String?
+   338→  createdAt        DateTime  @default(now())
+   339→  updatedAt        DateTime  @updatedAt
+   340→
+   341→  client   Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   342→  project  Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+   343→  proposal Proposal? @relation(fields: [proposalId], references: [id], onDelete: SetNull)
+   344→
+   345→  @@index([status])
+   346→  @@index([clientId])
+   347→}
+   348→
+   349→// ============ PROJECTS ============
+   350→
+   351→model Project {
+   352→  id                 String    @id @default(cuid())
+   353→  projectNumber      String    @unique
+   354→  name               String
+   355→  clientId           String
+   356→  description        String?
+   357→  type               String    @default("BUSINESS_WEBSITE")
+   358→  managerId          String?
+   359→  status             String    @default("PLANNING") // PLANNING ACTIVE ON_HOLD REVIEW COMPLETED CANCELLED
+   360→  priority           String    @default("MEDIUM")
+   361→  budget             Float?
+   362→  progress           Int       @default(0)
+   363→  health             String    @default("ON_TRACK") // ON_TRACK AT_RISK DELAYED
+   364→  startDate          DateTime?
+   365→  deadline           DateTime?
+   366→  onboardingChecklist String? // JSON [{text,isDone}]
+   367→  completionChecklist String? // JSON [{text,isDone}]
+   368→  createdById        String?
+   369→  archivedAt         DateTime?
+   370→  createdAt          DateTime  @default(now())
+   371→  updatedAt          DateTime  @updatedAt
+   372→
+   373→  client   Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   374→  manager  User?          @relation("ProjectManager", fields: [managerId], references: [id], onDelete: SetNull)
+   375→  members  ProjectMember[]
+   376→  phases   ProjectPhase[]
+   377→  tasks    Task[]
+   378→  meetings Meeting[]
+   379→  contracts Contract[]
+   380→  invoices Invoice[]
+   381→  tickets  Ticket[]
+   382→  maintenancePlans MaintenancePlan[]
+   383→  expenses Expense[]
+   384→
+   385→  @@index([status])
+   386→  @@index([clientId])
+   387→  @@index([managerId])
+   388→}
+   389→
+   390→model ProjectMember {
+   391→  id        String @id @default(cuid())
+   392→  projectId String
+   393→  userId    String
+   394→  role      String @default("MEMBER")
+   395→
+   396→  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+   397→  user    User    @relation("ProjectMemberships", fields: [userId], references: [id], onDelete: Cascade)
+   398→
+   399→  @@unique([projectId, userId])
+   400→}
+   401→
+   402→model ProjectPhase {
+   403→  id        String @id @default(cuid())
+   404→  projectId String
+   405→  name      String
+   406→  order     Int    @default(0)
+   407→  status    String @default("PENDING") // PENDING IN_PROGRESS COMPLETED
+   408→
+   409→  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+   410→  tasks   Task[]
+   411→
+   412→  @@index([projectId])
+   413→}
+   414→
+   415→model Task {
+   416→  id             String    @id @default(cuid())
+   417→  title          String
+   418→  description    String?
+   419→  projectId      String?
+   420→  phaseId        String?
+   421→  assigneeId     String?
+   422→  reporterId     String?
+   423→  priority       String    @default("MEDIUM") // LOW MEDIUM HIGH URGENT
+   424→  status         String    @default("BACKLOG") // BACKLOG TODO IN_PROGRESS REVIEW BLOCKED DONE
+   425→  dueDate        DateTime?
+   426→  estimatedHours Float?
+   427→  actualHours    Float?
+   428→  labels         String? // JSON array
+   429→  position       Int       @default(0)
+   430→  completedAt    DateTime?
+   431→  deletedAt      DateTime?
+   432→  createdAt      DateTime  @default(now())
+   433→  updatedAt      DateTime  @updatedAt
+   434→
+   435→  project   Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+   436→  phase     ProjectPhase? @relation(fields: [phaseId], references: [id], onDelete: SetNull)
+   437→  assignee  User?         @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+   438→  reporter  User?         @relation("TaskReporter", fields: [reporterId], references: [id], onDelete: SetNull)
+   439→  comments  TaskComment[]
+   440→  checklist TaskChecklistItem[]
+   441→
+   442→  @@index([status])
+   443→  @@index([assigneeId])
+   444→  @@index([projectId])
+   445→  @@index([dueDate])
+   446→}
+   447→
+   448→model TaskComment {
+   449→  id       String   @id @default(cuid())
+   450→  taskId   String
+   451→  authorId String?
+   452→  body     String
+   453→  createdAt DateTime @default(now())
+   454→
+   455→  task   Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+   456→  author User? @relation(fields: [authorId], references: [id], onDelete: SetNull)
+   457→
+   458→  @@index([taskId])
+   459→}
+   460→
+   461→model TaskChecklistItem {
+   462→  id      String  @id @default(cuid())
+   463→  taskId  String
+   464→  text    String
+   465→  isDone  Boolean @default(false)
+   466→  order   Int     @default(0)
+   467→
+   468→  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+   469→
+   470→  @@index([taskId])
+   471→}
+   472→
+   473→// ============ FILES (metadata; binary storage API in later phase) ============
+   474→
+   475→model FileRecord {
+   476→  id           String   @id @default(cuid())
+   477→  filename     String
+   478→  originalName String
+   479→  size         Int      @default(0)
+   480→  mimeType     String?
+   481→  entityType   String
+   482→  entityId     String
+   483→  version      Int      @default(1)
+   484→  storagePath  String?
+   485→  uploaderId   String?
+   486→  createdAt    DateTime @default(now())
+   487→
+   488→  @@index([entityType, entityId])
+   489→}
+   490→
+   491→// ============ FINANCE ============
+   492→
+   493→model Invoice {
+   494→  id           String    @id @default(cuid())
+   495→  invoiceNumber String   @unique
+   496→  clientId     String
+   497→  projectId    String?
+   498→  issueDate    DateTime  @default(now())
+   499→  dueDate      DateTime?
+   500→  status       String    @default("DRAFT") // DRAFT SENT PARTIALLY_PAID PAID OVERDUE CANCELLED
+   501→  currency     String    @default("EGP")
+   502→  subtotal     Float     @default(0)
+   503→  discountAmount Float   @default(0)
+   504→  taxPercent   Float     @default(0)
+   505→  total        Float     @default(0)
+   506→  paidAmount   Float     @default(0)
+   507→  paymentTerms String?
+   508→  notes        String?
+   509→  createdAt    DateTime  @default(now())
+   510→  updatedAt    DateTime  @updatedAt
+   511→
+   512→  client   Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   513→  project  Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+   514→  items    InvoiceItem[]
+   515→  payments Payment[]
+   516→
+   517→  @@index([status])
+   518→  @@index([clientId])
+   519→  @@index([dueDate])
+   520→}
+   521→
+   522→model InvoiceItem {
+   523→  id          String @id @default(cuid())
+   524→  invoiceId   String
+   525→  description String
+   526→  quantity    Float  @default(1)
+   527→  unitPrice   Float  @default(0)
+   528→  total       Float  @default(0)
+   529→  order       Int    @default(0)
+   530→
+   531→  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+   532→
+   533→  @@index([invoiceId])
+   534→}
+   535→
+   536→model Payment {
+   537→  id           String   @id @default(cuid())
+   538→  invoiceId    String?
+   539→  clientId     String?
+   540→  amount       Float
+   541→  date         DateTime @default(now())
+   542→  method       String   @default("BANK_TRANSFER")
+   543→  reference    String?
+   544→  notes        String?
+   545→  recordedById String?
+   546→  createdAt    DateTime @default(now())
+   547→  updatedAt    DateTime @updatedAt
+   548→
+   549→  invoice    Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+   550→  client     Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+   551→  recordedBy User?    @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+   552→
+   553→  @@index([date])
+   554→  @@index([invoiceId])
+   555→}
+   556→
+   557→model Expense {
+   558→  id          String   @id @default(cuid())
+   559→  category    String   @default("OTHER") // HOSTING DOMAIN SOFTWARE MARKETING OPERATIONS OTHER
+   560→  description String
+   561→  amount      Float
+   562→  date        DateTime @default(now())
+   563→  vendor      String?
+   564→  projectId   String?
+   565→  receiptFileId String?
+   566→  createdById String?
+   567→  createdAt   DateTime @default(now())
+   568→  updatedAt   DateTime @updatedAt
+   569→
+   570→  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+   571→
+   572→  @@index([category])
+   573→  @@index([date])
+   574→}
+   575→
+   576→// ============ MARKETING ============
+   577→
+   578→model Campaign {
+   579→  id        String    @id @default(cuid())
+   580→  name      String
+   581→  objective String?
+   582→  audience  String?
+   583→  platform  String?
+   584→  startDate DateTime?
+   585→  endDate   DateTime?
+   586→  budget    Float?
+   587→  status    String    @default("PLANNING") // PLANNING ACTIVE PAUSED COMPLETED CANCELLED
+   588→  notes     String?
+   589→  createdAt DateTime  @default(now())
+   590→  updatedAt DateTime  @updatedAt
+   591→
+   592→  contents Content[]
+   593→
+   594→  @@index([status])
+   595→}
+   596→
+   597→model Content {
+   598→  id          String    @id @default(cuid())
+   599→  title       String
+   600→  platform    String    @default("INSTAGRAM") // INSTAGRAM FACEBOOK LINKEDIN YOUTUBE OTHER
+   601→  contentType String    @default("POST") // POST REEL STORY ARTICLE OFFER CASE_STUDY
+   602→  caption     String?
+   603→  cta         String?
+   604→  hashtags    String?
+   605→  mediaUrl    String?
+   606→  publishDate DateTime?
+   607→  status      String    @default("IDEA") // IDEA DRAFT REVIEW APPROVED SCHEDULED PUBLISHED ARCHIVED
+   608→  authorId    String?
+   609→  reviewerId  String?
+   610→  campaignId  String?
+   611→  createdAt   DateTime  @default(now())
+   612→  updatedAt   DateTime  @updatedAt
+   613→
+   614→  author   User?     @relation("ContentAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+   615→  reviewer User?     @relation("ContentReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+   616→  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+   617→
+   618→  @@index([status])
+   619→  @@index([publishDate])
+   620→  @@index([authorId])
+   621→  @@index([campaignId])
+   622→}
+   623→
+   624→// ============ SUPPORT ============
+   625→
+   626→model Ticket {
+   627→  id           String    @id @default(cuid())
+   628→  ticketNumber String    @unique
+   629→  clientId     String
+   630→  projectId    String?
+   631→  category     String    @default("OTHER") // BUG CHANGE_REQUEST QUESTION FEATURE_REQUEST TECHNICAL_ISSUE OTHER
+   632→  priority     String    @default("MEDIUM")
+   633→  subject      String
+   634→  description  String?
+   635→  assignedToId String?
+   636→  status       String    @default("OPEN") // OPEN IN_PROGRESS WAITING_CLIENT RESOLVED CLOSED
+   637→  closedAt     DateTime?
+   638→  deletedAt    DateTime?
+   639→  createdAt    DateTime  @default(now())
+   640→  updatedAt    DateTime  @updatedAt
+   641→
+   642→  client     Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   643→  project    Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
+   644→  assignedTo User?           @relation("TicketAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+   645→  messages   TicketMessage[]
+   646→
+   647→  @@index([status])
+   648→  @@index([clientId])
+   649→  @@index([deletedAt])
+   650→}
+   651→
+   652→model TicketMessage {
+   653→  id         String   @id @default(cuid())
+   654→  ticketId   String
+   655→  authorId   String?
+   656→  authorName String?
+   657→  isInternal Boolean  @default(false)
+   658→  body       String
+   659→  createdAt  DateTime @default(now())
+   660→
+   661→  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+   662→
+   663→  @@index([ticketId])
+   664→}
+   665→
+   666→model MaintenancePlan {
+   667→  id            String    @id @default(cuid())
+   668→  clientId      String
+   669→  projectId     String?
+   670→  plan          String    @default("STANDARD")
+   671→  startDate     DateTime  @default(now())
+   672→  endDate       DateTime?
+   673→  includedHours Float?
+   674→  usedHours     Float     @default(0)
+   675→  status        String    @default("ACTIVE") // ACTIVE EXPIRED CANCELLED
+   676→  notes         String?
+   677→  deletedAt     DateTime?
+   678→  createdAt     DateTime  @default(now())
+   679→  updatedAt     DateTime  @updatedAt
+   680→
+   681→  client  Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+   682→  project Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+   683→  logs    MaintenanceLog[]
+   684→
+   685→  @@index([status])
+   686→  @@index([clientId])
+   687→  @@index([deletedAt])
+   688→}
+   689→
+   690→model MaintenanceLog {
+   691→  id           String          @id @default(cuid())
+   692→  planId       String
+   693→  hours        Float
+   694→  note         String?
+   695→  loggedById   String?
+   696→  loggedByName String?
+   697→  spentOn      DateTime        @default(now())
+   698→  createdAt    DateTime        @default(now())
+   699→
+   700→  plan     MaintenancePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+   701→  loggedBy User?           @relation("MaintenanceLogger", fields: [loggedById], references: [id], onDelete: SetNull)
+   702→
+   703→  @@index([planId])
+   704→}
+   705→
+   706→// ============ PLATFORM ============
+   707→
+   708→model Notification {
+   709→  id         String   @id @default(cuid())
+   710→  userId     String
+   711→  type       String
+   712→  title      String
+   713→  body       String?
+   714→  entityType String?
+   715→  entityId   String?
+   716→  isRead     Boolean  @default(false)
+   717→  createdAt  DateTime @default(now())
+   718→
+   719→  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+   720→
+   721→  @@index([userId, isRead])
+   722→  @@index([createdAt])
+   723→}
+   724→
+   725→model KnowledgeArticle {
+   726→  id         String    @id @default(cuid())
+   727→  title      String
+   728→  category   String    @default("OPERATIONS") // SALES DEVELOPMENT DESIGN DEPLOYMENT MARKETING OPERATIONS SOP TROUBLESHOOTING TEMPLATES
+   729→  content    String
+   730→  authorId   String?
+   731→  version    Int       @default(1)
+   732→  visibility String    @default("INTERNAL") // INTERNAL TEAM
+   733→  deletedAt  DateTime?
+   734→  createdAt  DateTime  @default(now())
+   735→  updatedAt  DateTime  @updatedAt
+   736→
+   737→  author User? @relation("KnowledgeAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+   738→
+   739→  @@index([category])
+   740→  @@index([deletedAt])
+   741→  @@index([authorId])
+   742→}
+   743→
+   744→model Automation {
+   745→  id          String    @id @default(cuid())
+   746→  name        String
+   747→  description String?
+   748→  trigger     String
+   749→  condition   String? // JSON { field, equals? , in? } — optional guard
+   750→  config      String? // JSON — reserved for trigger options
+   751→  actions     String? // JSON array of { type, roleKey?, title, body? }
+   752→  isActive    Boolean   @default(true)
+   753→  lastRunAt   DateTime?
+   754→  runCount    Int       @default(0)
+   755→  createdAt   DateTime  @default(now())
+   756→  updatedAt   DateTime  @updatedAt
+   757→
+   758→  @@index([trigger, isActive])
+   759→}
+   760→
+   761→model AuditLog {
+   762→  id         String   @id @default(cuid())
+   763→  actorId    String?
+   764→  actorName  String?
+   765→  action     String // LOGIN LOGOUT CREATE UPDATE DELETE STATUS_CHANGE PERMISSION_CHANGE FINANCE_ACTION CONVERT
+   766→  entityType String
+   767→  entityId   String?
+   768→  metadata   String? // JSON
+   769→  ip         String?
+   770→  createdAt  DateTime @default(now())
+   771→
+   772→  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+   773→
+   774→  @@index([entityType, entityId])
+   775→  @@index([createdAt])
+   776→}
+   777→
+   778→model Setting {
+   779→  key       String   @id
+   780→  value     String // JSON
+   781→  updatedAt DateTime @updatedAt
+   782→}
+   783→

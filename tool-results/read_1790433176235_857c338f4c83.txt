@@ -1,0 +1,1097 @@
+     1→"use client";
+     2→
+     3→/**
+     4→ * Shared CRM components: lead detail drawer, lead form dialog, conversion dialog,
+     5→ * lost-reason dialog and the activity timeline. Used by Leads table, Pipeline and Clients.
+     6→ */
+     7→
+     8→import { useCallback, useEffect, useMemo, useState } from "react";
+     9→import type { LucideIcon } from "lucide-react";
+    10→import {
+    11→  PlusCircle, Pencil, ArrowRightLeft, Phone, MessageCircle, CalendarDays, FileText,
+    12→  FolderKanban, Receipt, Wallet, LifeBuoy, StickyNote, History, UserPlus, Loader2,
+    13→  ArrowUpRight,
+    14→} from "lucide-react";
+    15→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+    16→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+    17→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+    18→import { Button } from "@/components/ui/button";
+    19→import { Input } from "@/components/ui/input";
+    20→import { Textarea } from "@/components/ui/textarea";
+    21→import { Label } from "@/components/ui/label";
+    22→import { Checkbox } from "@/components/ui/checkbox";
+    23→import { ScrollArea } from "@/components/ui/scroll-area";
+    24→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    25→import { Separator } from "@/components/ui/separator";
+    26→import { StatusBadge, PriorityBadge, ErrorState, ListSkeleton, Field } from "@/components/shared";
+    27→import { api, formatCurrency, formatDate, formatDateTime, relativeTime, initials } from "@/lib/api-client";
+    28→import { useToast } from "@/hooks/use-toast";
+    29→import { cn } from "@/lib/utils";
+    30→
+    31→// ============ Constants ============
+    32→
+    33→export const LEAD_STATUSES = ["NEW", "CONTACTED", "QUALIFIED", "MEETING", "PROPOSAL_SENT", "NEGOTIATION", "WON", "LOST"] as const;
+    34→export const LEAD_SOURCES = ["WEBSITE", "REFERRAL", "INSTAGRAM", "FACEBOOK", "LINKEDIN", "WHATSAPP", "EMAIL", "COLD_CALL", "EVENT", "OTHER"] as const;
+    35→export const PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"] as const;
+    36→export const PROJECT_TYPES = [
+    37→  "BUSINESS_WEBSITE", "ECOMMERCE", "WEB_APPLICATION", "CUSTOM_SOFTWARE", "CRM",
+    38→  "DASHBOARD", "EDUCATIONAL_PLATFORM", "LANDING_PAGE", "AUTOMATION_SYSTEM", "MAINTENANCE",
+    39→] as const;
+    40→
+    41→export const statusLabel = (s: string) => s.replace(/_/g, " ");
+    42→export const humanLabel = (s: string) =>
+    43→  s.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+    44→
+    45→// ============ Types ============
+    46→
+    47→export type TeamMember = { id: string; name: string; avatarColor: string; title?: string | null };
+    48→export type LeadAssigned = { id: string; name: string; avatarColor: string };
+    49→
+    50→export type Lead = {
+    51→  id: string;
+    52→  leadNumber: string;
+    53→  companyName: string;
+    54→  contactName: string;
+    55→  phone: string;
+    56→  email: string | null;
+    57→  website: string | null;
+    58→  instagram: string | null;
+    59→  facebook: string | null;
+    60→  linkedin: string | null;
+    61→  industry: string | null;
+    62→  location: string | null;
+    63→  source: string;
+    64→  serviceInterest: string | null;
+    65→  estimatedBudget: number | null;
+    66→  priority: string;
+    67→  status: string;
+    68→  notes: string | null;
+    69→  nextFollowUpAt: string | null;
+    70→  lostReason: string | null;
+    71→  convertedClientId: string | null;
+    72→  assignedToId: string | null;
+    73→  createdAt: string;
+    74→  deletedAt?: string | null;
+    75→  assignedTo?: LeadAssigned | null;
+    76→  convertedClient?: { id: string; companyName: string; clientNumber: string } | null;
+    77→};
+    78→
+    79→export type FollowUpItem = {
+    80→  id: string;
+    81→  title: string;
+    82→  leadId: string | null;
+    83→  clientId: string | null;
+    84→  assignedToId: string | null;
+    85→  dueAt: string;
+    86→  priority: string;
+    87→  notes: string | null;
+    88→  status: string;
+    89→  completedAt: string | null;
+    90→  createdAt: string;
+    91→  lead?: { id: string; companyName: string; leadNumber: string } | null;
+    92→  client?: { id: string; companyName: string; clientNumber: string } | null;
+    93→  assignedTo?: LeadAssigned | null;
+    94→};
+    95→
+    96→export type ActivityItem = {
+    97→  id: string;
+    98→  type: string;
+    99→  title: string;
+   100→  description?: string | null;
+   101→  actorName: string;
+   102→  actorColor: string;
+   103→  createdAt: string;
+   104→};
+   105→
+   106→type LeadDetail = Lead & {
+   107→  createdBy?: LeadAssigned | null;
+   108→  followUps: FollowUpItem[];
+   109→  meetings: { id: string; title: string; date: string; startTime: string; endTime: string; status: string }[];
+   110→  proposals: { id: string; proposalNumber: string; title: string; status: string; total: number; createdAt: string }[];
+   111→};
+   112→
+   113→type LeadDetailResponse = { lead: LeadDetail; activities: ActivityItem[] };
+   114→
+   115→// ============ Helpers ============
+   116→
+   117→/** Date → value usable by <input type="datetime-local"> in the user's local timezone. */
+   118→export function toLocalInput(d: string | Date | null | undefined): string {
+   119→  if (!d) return "";
+   120→  const dt = new Date(d);
+   121→  if (Number.isNaN(dt.getTime())) return "";
+   122→  const pad = (n: number) => String(n).padStart(2, "0");
+   123→  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+   124→}
+   125→
+   126→export function isOverdueDate(d: string | Date | null | undefined): boolean {
+   127→  if (!d) return false;
+   128→  const t = new Date(d).getTime();
+   129→  return !Number.isNaN(t) && t < Date.now();
+   130→}
+   131→
+   132→/** Fetch active team members; returns empty list when the caller lacks team.view. */
+   133→export function useTeam(): { team: TeamMember[]; hasAccess: boolean } {
+   134→  const [team, setTeam] = useState<TeamMember[]>([]);
+   135→  const [hasAccess, setHasAccess] = useState(false);
+   136→
+   137→  useEffect(() => {
+   138→    let cancelled = false;
+   139→    api.get<{ team: TeamMember[] }>("/api/team")
+   140→      .then((d) => { if (!cancelled) { setTeam(d.team); setHasAccess(true); } })
+   141→      .catch(() => { if (!cancelled) { setTeam([]); setHasAccess(false); } });
+   142→    return () => { cancelled = true; };
+   143→  }, []);
+   144→
+   145→  return { team, hasAccess };
+   146→}
+   147→
+   148→export function UserAvatar({ name, color, size = 28 }: { name: string | null | undefined; color?: string; size?: number }) {
+   149→  const c = color || "#22d3ee";
+   150→  return (
+   151→    <span
+   152→      className="inline-flex items-center justify-center rounded-full font-bold border shrink-0"
+   153→      style={{
+   154→        width: size, height: size, fontSize: size * 0.36,
+   155→        backgroundColor: `${c}22`, color: c, borderColor: `${c}55`,
+   156→      }}
+   157→      title={name || undefined}
+   158→    >
+   159→      {initials(name)}
+   160→    </span>
+   161→  );
+   162→}
+   163→
+   164→// ============ Activity timeline ============
+   165→
+   166→const ACTIVITY_ICONS: Record<string, LucideIcon> = {
+   167→  CREATED: PlusCircle,
+   168→  UPDATED: Pencil,
+   169→  STATUS_CHANGED: ArrowRightLeft,
+   170→  CALL: Phone,
+   171→  WHATSAPP: MessageCircle,
+   172→  MEETING: CalendarDays,
+   173→  PROPOSAL: FileText,
+   174→  PROJECT: FolderKanban,
+   175→  INVOICE: Receipt,
+   176→  PAYMENT: Wallet,
+   177→  TICKET: LifeBuoy,
+   178→  NOTE: StickyNote,
+   179→};
+   180→
+   181→export function ActivityTimeline({ items, emptyText }: { items: ActivityItem[]; emptyText?: string }) {
+   182→  if (items.length === 0) {
+   183→    return <p className="text-sm text-muted-foreground text-center py-10">{emptyText || "No activity recorded yet."}</p>;
+   184→  }
+   185→  return (
+   186→    <div className="space-y-4">
+   187→      {items.map((a) => {
+   188→        const Icon = ACTIVITY_ICONS[a.type] || History;
+   189→        return (
+   190→          <div key={a.id} className="flex gap-3">
+   191→            <div className="flex flex-col items-center shrink-0">
+   192→              <div className="w-7 h-7 rounded-lg bg-secondary/70 border border-border flex items-center justify-center">
+   193→                <Icon className="w-3.5 h-3.5 text-primary" />
+   194→              </div>
+   195→            </div>
+   196→            <div className="min-w-0 flex-1">
+   197→              <p className="text-sm leading-snug">{a.title}</p>
+   198→              {a.description && <p className="text-xs text-muted-foreground mt-0.5">{a.description}</p>}
+   199→              <div className="flex items-center gap-2 mt-1">
+   200→                <UserAvatar name={a.actorName} color={a.actorColor} size={18} />
+   201→                <span className="text-[11px] text-muted-foreground">{a.actorName} · {relativeTime(a.createdAt)}</span>
+   202→              </div>
+   203→            </div>
+   204→          </div>
+   205→        );
+   206→      })}
+   207→    </div>
+   208→  );
+   209→}
+   210→
+   211→// ============ Lost reason dialog (required when a lead is marked LOST) ============
+   212→
+   213→export function LostReasonDialog({
+   214→  open, onOpenChange, companyName, onConfirm,
+   215→}: {
+   216→  open: boolean;
+   217→  onOpenChange: (o: boolean) => void;
+   218→  companyName?: string;
+   219→  onConfirm: (reason: string) => void;
+   220→}) {
+   221→  const [reason, setReason] = useState("");
+   222→  const [error, setError] = useState("");
+   223→
+   224→  // Reset on close (event-driven, not in an effect)
+   225→  const handleOpenChange = (o: boolean) => {
+   226→    if (!o) { setReason(""); setError(""); }
+   227→    onOpenChange(o);
+   228→  };
+   229→
+   230→  const submit = () => {
+   231→    if (reason.trim().length < 3) { setError("Please describe why this lead is being lost."); return; }
+   232→    onConfirm(reason.trim());
+   233→  };
+   234→
+   235→  return (
+   236→    <Dialog open={open} onOpenChange={handleOpenChange}>
+   237→      <DialogContent className="sm:max-w-md">
+   238→        <DialogHeader>
+   239→          <DialogTitle>Mark as lost</DialogTitle>
+   240→          <DialogDescription>
+   241→            {companyName ? `${companyName} — ` : ""}a lost reason is required for reporting.
+   242→          </DialogDescription>
+   243→        </DialogHeader>
+   244→        <div className="space-y-1.5">
+   245→          <Label htmlFor="lost-reason">Lost reason *</Label>
+   246→          <Textarea
+   247→            id="lost-reason"
+   248→            value={reason}
+   249→            onChange={(e) => { setReason(e.target.value); setError(""); }}
+   250→            placeholder="e.g. Budget too low, chose a competitor, no response…"
+   251→            rows={3}
+   252→          />
+   253→          {error && <p className="text-xs text-destructive">{error}</p>}
+   254→        </div>
+   255→        <DialogFooter>
+   256→          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   257→          <Button variant="destructive" onClick={submit}>Mark as lost</Button>
+   258→        </DialogFooter>
+   259→      </DialogContent>
+   260→    </Dialog>
+   261→  );
+   262→}
+   263→
+   264→// ============ Lead form dialog (create + edit) ============
+   265→
+   266→type LeadFormValues = {
+   267→  companyName: string; contactName: string; phone: string; email: string; website: string;
+   268→  instagram: string; facebook: string; linkedin: string; industry: string; location: string;
+   269→  source: string; serviceInterest: string; estimatedBudget: string; priority: string;
+   270→  assignedToId: string; nextFollowUpAt: string; notes: string;
+   271→};
+   272→
+   273→const emptyLeadForm: LeadFormValues = {
+   274→  companyName: "", contactName: "", phone: "", email: "", website: "",
+   275→  instagram: "", facebook: "", linkedin: "", industry: "", location: "",
+   276→  source: "OTHER", serviceInterest: "", estimatedBudget: "", priority: "MEDIUM",
+   277→  assignedToId: "", nextFollowUpAt: "", notes: "",
+   278→};
+   279→
+   280→function leadToForm(l: Lead): LeadFormValues {
+   281→  return {
+   282→    companyName: l.companyName, contactName: l.contactName, phone: l.phone,
+   283→    email: l.email || "", website: l.website || "", instagram: l.instagram || "",
+   284→    facebook: l.facebook || "", linkedin: l.linkedin || "", industry: l.industry || "",
+   285→    location: l.location || "", source: l.source, serviceInterest: l.serviceInterest || "",
+   286→    estimatedBudget: l.estimatedBudget != null ? String(l.estimatedBudget) : "",
+   287→    priority: l.priority, assignedToId: l.assignedToId || "",
+   288→    nextFollowUpAt: toLocalInput(l.nextFollowUpAt), notes: l.notes || "",
+   289→  };
+   290→}
+   291→
+   292→export function LeadFormDialog({
+   293→  open, onOpenChange, lead, onSaved,
+   294→}: {
+   295→  open: boolean;
+   296→  onOpenChange: (o: boolean) => void;
+   297→  lead?: Lead | null;
+   298→  onSaved: () => void;
+   299→}) {
+   300→  const { toast } = useToast();
+   301→  const { team, hasAccess } = useTeam();
+   302→  const [values, setValues] = useState<LeadFormValues>(emptyLeadForm);
+   303→  const [errors, setErrors] = useState<Record<string, string>>({});
+   304→  const [saving, setSaving] = useState(false);
+   305→  const isEdit = Boolean(lead);
+   306→
+   307→  useEffect(() => {
+   308→    if (open) {
+   309→      setValues(lead ? leadToForm(lead) : emptyLeadForm);
+   310→      setErrors({});
+   311→    }
+   312→  }, [open, lead]);
+   313→
+   314→  const set = (key: keyof LeadFormValues, value: string) =>
+   315→    setValues((v) => ({ ...v, [key]: value }));
+   316→
+   317→  const validate = (): boolean => {
+   318→    const e: Record<string, string> = {};
+   319→    if (values.companyName.trim().length < 2) e.companyName = "Company name is required (min 2 characters).";
+   320→    if (values.contactName.trim().length < 2) e.contactName = "Contact name is required (min 2 characters).";
+   321→    if (values.phone.trim().length < 7) e.phone = "Phone number is required (min 7 characters).";
+   322→    if (values.estimatedBudget && Number.isNaN(Number(values.estimatedBudget))) e.estimatedBudget = "Budget must be a number.";
+   323→    setErrors(e);
+   324→    return Object.keys(e).length === 0;
+   325→  };
+   326→
+   327→  const submit = async () => {
+   328→    if (!validate()) return;
+   329→    setSaving(true);
+   330→    const payload = {
+   331→      companyName: values.companyName.trim(),
+   332→      contactName: values.contactName.trim(),
+   333→      phone: values.phone.trim(),
+   334→      email: values.email.trim(),
+   335→      website: values.website.trim(),
+   336→      instagram: values.instagram.trim(),
+   337→      facebook: values.facebook.trim(),
+   338→      linkedin: values.linkedin.trim(),
+   339→      industry: values.industry.trim(),
+   340→      location: values.location.trim(),
+   341→      source: values.source,
+   342→      serviceInterest: values.serviceInterest.trim(),
+   343→      estimatedBudget: values.estimatedBudget === "" ? null : Number(values.estimatedBudget),
+   344→      priority: values.priority,
+   345→      assignedToId: values.assignedToId || null,
+   346→      nextFollowUpAt: values.nextFollowUpAt ? new Date(values.nextFollowUpAt).toISOString() : null,
+   347→      notes: values.notes.trim() || null,
+   348→    };
+   349→    try {
+   350→      if (isEdit && lead) {
+   351→        await api.patch<Lead>(`/api/leads/${lead.id}`, payload);
+   352→        toast({ title: "Lead updated", description: `${payload.companyName} was saved successfully.` });
+   353→      } else {
+   354→        const created = await api.post<Lead>("/api/leads", payload);
+   355→        toast({ title: "Lead created", description: `${created.leadNumber} — ${created.companyName}` });
+   356→      }
+   357→      onOpenChange(false);
+   358→      onSaved();
+   359→    } catch (err) {
+   360→      toast({ title: isEdit ? "Update failed" : "Create failed", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   361→    } finally {
+   362→      setSaving(false);
+   363→    }
+   364→  };
+   365→
+   366→  return (
+   367→    <Dialog open={open} onOpenChange={onOpenChange}>
+   368→      <DialogContent className="sm:max-w-2xl max-h-[92vh] overflow-y-auto apex-scroll">
+   369→        <DialogHeader>
+   370→          <DialogTitle>{isEdit ? `Edit lead — ${lead?.companyName}` : "New lead"}</DialogTitle>
+   371→          <DialogDescription>
+   372→            {isEdit ? "Update the lead details below." : "Capture a new sales opportunity. Fields marked * are required."}
+   373→          </DialogDescription>
+   374→        </DialogHeader>
+   375→
+   376→        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+   377→          <Field label="Company name" required>
+   378→            <Input value={values.companyName} onChange={(e) => set("companyName", e.target.value)} placeholder="Acme Ltd." />
+   379→            {errors.companyName && <p className="text-xs text-destructive">{errors.companyName}</p>}
+   380→          </Field>
+   381→          <Field label="Contact person" required>
+   382→            <Input value={values.contactName} onChange={(e) => set("contactName", e.target.value)} placeholder="John Smith" />
+   383→            {errors.contactName && <p className="text-xs text-destructive">{errors.contactName}</p>}
+   384→          </Field>
+   385→          <Field label="Phone" required>
+   386→            <Input value={values.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+20 100 000 0000" dir="ltr" />
+   387→            {errors.phone && <p className="text-xs text-destructive">{errors.phone}</p>}
+   388→          </Field>
+   389→          <Field label="Email">
+   390→            <Input value={values.email} onChange={(e) => set("email", e.target.value)} placeholder="hello@acme.com" type="email" dir="ltr" />
+   391→          </Field>
+   392→          <Field label="Website">
+   393→            <Input value={values.website} onChange={(e) => set("website", e.target.value)} placeholder="https://acme.com" dir="ltr" />
+   394→          </Field>
+   395→          <Field label="Industry">
+   396→            <Input value={values.industry} onChange={(e) => set("industry", e.target.value)} placeholder="Real estate, F&B…" />
+   397→          </Field>
+   398→          <Field label="Instagram">
+   399→            <Input value={values.instagram} onChange={(e) => set("instagram", e.target.value)} placeholder="@acme" dir="ltr" />
+   400→          </Field>
+   401→          <Field label="Facebook">
+   402→            <Input value={values.facebook} onChange={(e) => set("facebook", e.target.value)} placeholder="facebook.com/acme" dir="ltr" />
+   403→          </Field>
+   404→          <Field label="LinkedIn">
+   405→            <Input value={values.linkedin} onChange={(e) => set("linkedin", e.target.value)} placeholder="linkedin.com/company/acme" dir="ltr" />
+   406→          </Field>
+   407→          <Field label="Location">
+   408→            <Input value={values.location} onChange={(e) => set("location", e.target.value)} placeholder="Cairo, Egypt" />
+   409→          </Field>
+   410→          <Field label="Source">
+   411→            <Select value={values.source} onValueChange={(v) => set("source", v)}>
+   412→              <SelectTrigger><SelectValue /></SelectTrigger>
+   413→              <SelectContent>
+   414→                {LEAD_SOURCES.map((s) => <SelectItem key={s} value={s}>{humanLabel(s)}</SelectItem>)}
+   415→              </SelectContent>
+   416→            </Select>
+   417→          </Field>
+   418→          <Field label="Service interest">
+   419→            <Input value={values.serviceInterest} onChange={(e) => set("serviceInterest", e.target.value)} placeholder="E-commerce website…" />
+   420→          </Field>
+   421→          <Field label="Estimated budget (EGP)">
+   422→            <Input value={values.estimatedBudget} onChange={(e) => set("estimatedBudget", e.target.value)} type="number" min="0" placeholder="50000" dir="ltr" />
+   423→            {errors.estimatedBudget && <p className="text-xs text-destructive">{errors.estimatedBudget}</p>}
+   424→          </Field>
+   425→          <Field label="Priority">
+   426→            <Select value={values.priority} onValueChange={(v) => set("priority", v)}>
+   427→              <SelectTrigger><SelectValue /></SelectTrigger>
+   428→              <SelectContent>
+   429→                {PRIORITIES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+   430→              </SelectContent>
+   431→            </Select>
+   432→          </Field>
+   433→          {hasAccess && (
+   434→            <Field label="Assigned to">
+   435→              <Select value={values.assignedToId || "UNASSIGNED"} onValueChange={(v) => set("assignedToId", v === "UNASSIGNED" ? "" : v)}>
+   436→                <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
+   437→                <SelectContent>
+   438→                  <SelectItem value="UNASSIGNED">Unassigned</SelectItem>
+   439→                  {team.map((m) => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
+   440→                </SelectContent>
+   441→              </Select>
+   442→            </Field>
+   443→          )}
+   444→          <Field label="Next follow-up">
+   445→            <Input value={values.nextFollowUpAt} onChange={(e) => set("nextFollowUpAt", e.target.value)} type="datetime-local" />
+   446→          </Field>
+   447→          <div className="sm:col-span-2">
+   448→            <Field label="Notes">
+   449→              <Textarea value={values.notes} onChange={(e) => set("notes", e.target.value)} rows={3} placeholder="Context, requirements, expectations…" />
+   450→            </Field>
+   451→          </div>
+   452→        </div>
+   453→
+   454→        <DialogFooter>
+   455→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+   456→          <Button onClick={submit} disabled={saving}>
+   457→            {saving && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+   458→            {isEdit ? "Save changes" : "Create lead"}
+   459→          </Button>
+   460→        </DialogFooter>
+   461→      </DialogContent>
+   462→    </Dialog>
+   463→  );
+   464→}
+   465→
+   466→// ============ Convert lead dialog (§62 smart conversion) ============
+   467→
+   468→export function ConvertLeadDialog({
+   469→  open, onOpenChange, lead, onConverted,
+   470→}: {
+   471→  open: boolean;
+   472→  onOpenChange: (o: boolean) => void;
+   473→  lead: Lead;
+   474→  onConverted: (clientId: string | null) => void;
+   475→}) {
+   476→  const { toast } = useToast();
+   477→  const { team } = useTeam();
+   478→  const [createClient, setCreateClient] = useState(true);
+   479→  const [createContact, setCreateContact] = useState(true);
+   480→  const [createProject, setCreateProject] = useState(false);
+   481→  const [notifyProjectManager, setNotifyProjectManager] = useState(true);
+   482→
+   483→  const [client, setClient] = useState({ companyName: "", industry: "", location: "", website: "", email: "", phone: "" });
+   484→  const [contact, setContact] = useState({ name: "", position: "", email: "", phone: "" });
+   485→  const [project, setProject] = useState({ name: "", type: "BUSINESS_WEBSITE", managerId: "", deadline: "", budget: "" });
+   486→  const [errors, setErrors] = useState<Record<string, string>>({});
+   487→  const [saving, setSaving] = useState(false);
+   488→
+   489→  useEffect(() => {
+   490→    if (open && lead) {
+   491→      setCreateClient(true);
+   492→      setCreateContact(true);
+   493→      setCreateProject(false);
+   494→      setNotifyProjectManager(true);
+   495→      setClient({
+   496→        companyName: lead.companyName, industry: lead.industry || "", location: lead.location || "",
+   497→        website: lead.website || "", email: lead.email || "", phone: lead.phone || "",
+   498→      });
+   499→      setContact({ name: lead.contactName, position: "", email: lead.email || "", phone: lead.phone || "" });
+   500→      setProject({
+   501→        name: `${lead.companyName}${lead.serviceInterest ? ` — ${lead.serviceInterest}` : " project"}`,
+   502→        type: "BUSINESS_WEBSITE", managerId: "", deadline: "",
+   503→        budget: lead.estimatedBudget != null ? String(lead.estimatedBudget) : "",
+   504→      });
+   505→      setErrors({});
+   506→    }
+   507→  }, [open, lead]);
+   508→
+   509→  const submit = async () => {
+   510→    const e: Record<string, string> = {};
+   511→    if (createClient && client.companyName.trim().length < 2) e.clientCompanyName = "Client company name is required.";
+   512→    if (createClient && createContact && contact.name.trim().length < 2) e.contactName = "Contact name is required.";
+   513→    if (createProject && project.name.trim().length < 2) e.projectName = "Project name is required.";
+   514→    setErrors(e);
+   515→    if (Object.keys(e).length > 0) return;
+   516→
+   517→    setSaving(true);
+   518→    try {
+   519→      const result = await api.post<{ clientId: string | null; clientNumber: string | null; projectId: string | null; projectNumber: string | null }>(
+   520→        "/api/conversions",
+   521→        {
+   522→          leadId: lead.id,
+   523→          options: {
+   524→            createClient,
+   525→            client: createClient ? {
+   526→              companyName: client.companyName.trim(),
+   527→              industry: client.industry.trim() || undefined,
+   528→              location: client.location.trim() || undefined,
+   529→              website: client.website.trim() || undefined,
+   530→              email: client.email.trim() || undefined,
+   531→              phone: client.phone.trim() || undefined,
+   532→            } : undefined,
+   533→            contact: createClient && createContact ? {
+   534→              name: contact.name.trim(),
+   535→              position: contact.position.trim() || undefined,
+   536→              email: contact.email.trim() || undefined,
+   537→              phone: contact.phone.trim() || undefined,
+   538→            } : undefined,
+   539→            createProject,
+   540→            project: createProject ? {
+   541→              name: project.name.trim(),
+   542→              type: project.type,
+   543→              managerId: project.managerId || undefined,
+   544→              deadline: project.deadline || undefined,
+   545→              budget: project.budget === "" ? undefined : Number(project.budget),
+   546→            } : undefined,
+   547→            notifyProjectManager,
+   548→          },
+   549→        }
+   550→      );
+   551→      toast({
+   552→        title: "Lead converted",
+   553→        description: [
+   554→          result.clientNumber ? `Client ${result.clientNumber} created` : null,
+   555→          result.projectNumber ? `Project ${result.projectNumber} created` : null,
+   556→        ].filter(Boolean).join(" · ") || "Conversion completed.",
+   557→      });
+   558→      onOpenChange(false);
+   559→      onConverted(result.clientId);
+   560→    } catch (err) {
+   561→      toast({ title: "Conversion failed", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   562→    } finally {
+   563→      setSaving(false);
+   564→    }
+   565→  };
+   566→
+   567→  return (
+   568→    <Dialog open={open} onOpenChange={onOpenChange}>
+   569→      <DialogContent className="sm:max-w-xl max-h-[92vh] overflow-y-auto apex-scroll">
+   570→        <DialogHeader>
+   571→          <DialogTitle>Convert lead to client</DialogTitle>
+   572→          <DialogDescription>
+   573→            {lead.companyName} ({lead.leadNumber}) — choose what to create. Client and contact are prefilled from the lead.
+   574→          </DialogDescription>
+   575→        </DialogHeader>
+   576→
+   577→        <div className="space-y-3">
+   578→          <label className="flex items-center gap-2.5 p-3 rounded-lg border border-border bg-secondary/30 cursor-pointer">
+   579→            <Checkbox checked={createClient} onCheckedChange={(v) => setCreateClient(v === true)} />
+   580→            <span className="text-sm font-medium">Create client</span>
+   581→          </label>
+   582→          {createClient && (
+   583→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-3 border-l-2 border-primary/20 ml-2">
+   584→              <Field label="Client company" required>
+   585→                <Input value={client.companyName} onChange={(e) => setClient({ ...client, companyName: e.target.value })} />
+   586→                {errors.clientCompanyName && <p className="text-xs text-destructive">{errors.clientCompanyName}</p>}
+   587→              </Field>
+   588→              <Field label="Phone"><Input value={client.phone} onChange={(e) => setClient({ ...client, phone: e.target.value })} dir="ltr" /></Field>
+   589→              <Field label="Email"><Input value={client.email} onChange={(e) => setClient({ ...client, email: e.target.value })} dir="ltr" /></Field>
+   590→              <Field label="Website"><Input value={client.website} onChange={(e) => setClient({ ...client, website: e.target.value })} dir="ltr" /></Field>
+   591→              <Field label="Industry"><Input value={client.industry} onChange={(e) => setClient({ ...client, industry: e.target.value })} /></Field>
+   592→              <Field label="Location"><Input value={client.location} onChange={(e) => setClient({ ...client, location: e.target.value })} /></Field>
+   593→            </div>
+   594→          )}
+   595→
+   596→          {createClient && (
+   597→            <label className={cn("flex items-center gap-2.5 p-3 rounded-lg border border-border bg-secondary/30 cursor-pointer", !createClient && "opacity-50 pointer-events-none")}>
+   598→              <Checkbox checked={createContact} onCheckedChange={(v) => setCreateContact(v === true)} disabled={!createClient} />
+   599→              <span className="text-sm font-medium">Create primary contact</span>
+   600→            </label>
+   601→          )}
+   602→          {createClient && createContact && (
+   603→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-3 border-l-2 border-primary/20 ml-2">
+   604→              <Field label="Contact name" required>
+   605→                <Input value={contact.name} onChange={(e) => setContact({ ...contact, name: e.target.value })} />
+   606→                {errors.contactName && <p className="text-xs text-destructive">{errors.contactName}</p>}
+   607→              </Field>
+   608→              <Field label="Position"><Input value={contact.position} onChange={(e) => setContact({ ...contact, position: e.target.value })} placeholder="Marketing Manager" /></Field>
+   609→              <Field label="Contact email"><Input value={contact.email} onChange={(e) => setContact({ ...contact, email: e.target.value })} dir="ltr" /></Field>
+   610→              <Field label="Contact phone"><Input value={contact.phone} onChange={(e) => setContact({ ...contact, phone: e.target.value })} dir="ltr" /></Field>
+   611→            </div>
+   612→          )}
+   613→
+   614→          <label className="flex items-center gap-2.5 p-3 rounded-lg border border-border bg-secondary/30 cursor-pointer">
+   615→            <Checkbox checked={createProject} onCheckedChange={(v) => setCreateProject(v === true)} />
+   616→            <span className="text-sm font-medium">Create project</span>
+   617→          </label>
+   618→          {createProject && (
+   619→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-3 border-l-2 border-primary/20 ml-2">
+   620→              <Field label="Project name" required>
+   621→                <Input value={project.name} onChange={(e) => setProject({ ...project, name: e.target.value })} />
+   622→                {errors.projectName && <p className="text-xs text-destructive">{errors.projectName}</p>}
+   623→              </Field>
+   624→              <Field label="Project type">
+   625→                <Select value={project.type} onValueChange={(v) => setProject({ ...project, type: v })}>
+   626→                  <SelectTrigger><SelectValue /></SelectTrigger>
+   627→                  <SelectContent>
+   628→                    {PROJECT_TYPES.map((t) => <SelectItem key={t} value={t}>{humanLabel(t)}</SelectItem>)}
+   629→                  </SelectContent>
+   630→                </Select>
+   631→              </Field>
+   632→              {team.length > 0 && (
+   633→                <Field label="Project manager">
+   634→                  <Select value={project.managerId || "NONE"} onValueChange={(v) => setProject({ ...project, managerId: v === "NONE" ? "" : v })}>
+   635→                    <SelectTrigger><SelectValue placeholder="Select manager" /></SelectTrigger>
+   636→                    <SelectContent>
+   637→                      <SelectItem value="NONE">No manager yet</SelectItem>
+   638→                      {team.map((m) => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
+   639→                    </SelectContent>
+   640→                  </Select>
+   641→                </Field>
+   642→              )}
+   643→              <Field label="Deadline">
+   644→                <Input type="date" value={project.deadline} onChange={(e) => setProject({ ...project, deadline: e.target.value })} />
+   645→              </Field>
+   646→              <Field label="Budget (EGP)">
+   647→                <Input type="number" min="0" value={project.budget} onChange={(e) => setProject({ ...project, budget: e.target.value })} dir="ltr" />
+   648→              </Field>
+   649→              <label className="flex items-center gap-2.5 sm:col-span-2 cursor-pointer">
+   650→                <Checkbox checked={notifyProjectManager} onCheckedChange={(v) => setNotifyProjectManager(v === true)} />
+   651→                <span className="text-sm">Notify the project manager</span>
+   652→              </label>
+   653→            </div>
+   654→          )}
+   655→        </div>
+   656→
+   657→        <DialogFooter>
+   658→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+   659→          <Button onClick={submit} disabled={saving}>
+   660→            {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ArrowUpRight className="w-4 h-4 mr-2" />}
+   661→            Convert to client
+   662→          </Button>
+   663→        </DialogFooter>
+   664→      </DialogContent>
+   665→    </Dialog>
+   666→  );
+   667→}
+   668→
+   669→// ============ Lead detail drawer ============
+   670→
+   671→function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+   672→  return (
+   673→    <div className="flex items-start justify-between gap-4 py-1.5">
+   674→      <span className="text-xs text-muted-foreground shrink-0 pt-0.5">{label}</span>
+   675→      <span className="text-sm text-right break-words min-w-0">{value ?? "—"}</span>
+   676→    </div>
+   677→  );
+   678→}
+   679→
+   680→function DrawerFollowUpForm({
+   681→  leadId, onCreated,
+   682→}: {
+   683→  leadId: string;
+   684→  onCreated: () => void;
+   685→}) {
+   686→  const { toast } = useToast();
+   687→  const { team, hasAccess } = useTeam();
+   688→  const [open, setOpen] = useState(false);
+   689→  const [title, setTitle] = useState("");
+   690→  const [dueAt, setDueAt] = useState("");
+   691→  const [priority, setPriority] = useState("MEDIUM");
+   692→  const [assignedToId, setAssignedToId] = useState("");
+   693→  const [error, setError] = useState("");
+   694→  const [saving, setSaving] = useState(false);
+   695→
+   696→  const submit = async () => {
+   697→    if (title.trim().length < 2) { setError("Title is required."); return; }
+   698→    if (!dueAt) { setError("Due date is required."); return; }
+   699→    setSaving(true);
+   700→    try {
+   701→      await api.post("/api/followups", {
+   702→        title: title.trim(), leadId, priority,
+   703→        dueAt: new Date(dueAt).toISOString(),
+   704→        assignedToId: assignedToId || null,
+   705→      });
+   706→      toast({ title: "Follow-up added", description: `“${title.trim()}” was scheduled.` });
+   707→      setOpen(false);
+   708→      setTitle(""); setDueAt(""); setPriority("MEDIUM"); setAssignedToId(""); setError("");
+   709→      onCreated();
+   710→    } catch (err) {
+   711→      toast({ title: "Could not add follow-up", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   712→    } finally {
+   713→      setSaving(false);
+   714→    }
+   715→  };
+   716→
+   717→  return (
+   718→    <>
+   719→      <Button size="sm" variant="outline" onClick={() => setOpen(true)}><PlusCircle className="w-4 h-4 mr-2" /> Add follow-up</Button>
+   720→      <Dialog open={open} onOpenChange={setOpen}>
+   721→        <DialogContent className="sm:max-w-md">
+   722→          <DialogHeader>
+   723→            <DialogTitle>Add follow-up</DialogTitle>
+   724→            <DialogDescription>Quickly schedule a follow-up for this lead.</DialogDescription>
+   725→          </DialogHeader>
+   726→          <div className="space-y-3">
+   727→            <Field label="Title" required>
+   728→              <Input value={title} onChange={(e) => { setTitle(e.target.value); setError(""); }} placeholder="Call to discuss proposal" />
+   729→            </Field>
+   730→            <Field label="Due at" required>
+   731→              <Input type="datetime-local" value={dueAt} onChange={(e) => { setDueAt(e.target.value); setError(""); }} />
+   732→            </Field>
+   733→            <div className="grid grid-cols-2 gap-3">
+   734→              <Field label="Priority">
+   735→                <Select value={priority} onValueChange={setPriority}>
+   736→                  <SelectTrigger><SelectValue /></SelectTrigger>
+   737→                  <SelectContent>{PRIORITIES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
+   738→                </Select>
+   739→              </Field>
+   740→              {hasAccess && (
+   741→                <Field label="Assign to">
+   742→                  <Select value={assignedToId || "ME"} onValueChange={(v) => setAssignedToId(v === "ME" ? "" : v)}>
+   743→                    <SelectTrigger><SelectValue /></SelectTrigger>
+   744→                    <SelectContent>
+   745→                      <SelectItem value="ME">Unassigned</SelectItem>
+   746→                      {team.map((m) => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
+   747→                    </SelectContent>
+   748→                  </Select>
+   749→                </Field>
+   750→              )}
+   751→            </div>
+   752→            {error && <p className="text-xs text-destructive">{error}</p>}
+   753→          </div>
+   754→          <DialogFooter>
+   755→            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+   756→            <Button onClick={submit} disabled={saving}>
+   757→              {saving && <Loader2 className="w-4 h-4 mr-2 animate-spin" />} Save
+   758→            </Button>
+   759→          </DialogFooter>
+   760→        </DialogContent>
+   761→      </Dialog>
+   762→    </>
+   763→  );
+   764→}
+   765→
+   766→export function LeadDetailDrawer({
+   767→  leadId, open, onOpenChange, onChanged, navigate, permissions,
+   768→}: {
+   769→  leadId: string | null;
+   770→  open: boolean;
+   771→  onOpenChange: (o: boolean) => void;
+   772→  onChanged: () => void;
+   773→  navigate: (p: string) => void;
+   774→  permissions: string[];
+   775→}) {
+   776→  const { toast } = useToast();
+   777→  const [data, setData] = useState<LeadDetailResponse | null>(null);
+   778→  const [loading, setLoading] = useState(false);
+   779→  const [error, setError] = useState<string | null>(null);
+   780→  const [editOpen, setEditOpen] = useState(false);
+   781→  const [convertOpen, setConvertOpen] = useState(false);
+   782→  const [lostOpen, setLostOpen] = useState(false);
+   783→  const [busy, setBusy] = useState(false);
+   784→
+   785→  const canEdit = permissions.includes("leads.edit");
+   786→  const canConvert = permissions.includes("clients.create");
+   787→
+   788→  const load = useCallback(async () => {
+   789→    if (!leadId) return;
+   790→    setLoading(true);
+   791→    setError(null);
+   792→    try {
+   793→      setData(await api.get<LeadDetailResponse>(`/api/leads/${leadId}`));
+   794→    } catch (err) {
+   795→      setError(err instanceof Error ? err.message : "Failed to load this lead.");
+   796→    } finally {
+   797→      setLoading(false);
+   798→    }
+   799→  }, [leadId]);
+   800→
+   801→  useEffect(() => {
+   802→    if (open && leadId) load();
+   803→    if (!open) setData(null);
+   804→  }, [open, leadId, load]);
+   805→
+   806→  const lead = data?.lead;
+   807→
+   808→  const patch = async (payload: Record<string, unknown>, successTitle: string) => {
+   809→    if (!lead) return;
+   810→    setBusy(true);
+   811→    try {
+   812→      await api.patch<Lead>(`/api/leads/${lead.id}`, payload);
+   813→      toast({ title: successTitle });
+   814→      await load();
+   815→      onChanged();
+   816→    } catch (err) {
+   817→      toast({ title: "Update failed", description: err instanceof Error ? err.message : "Something went wrong.", variant: "destructive" });
+   818→    } finally {
+   819→      setBusy(false);
+   820→    }
+   821→  };
+   822→
+   823→  const onStatusChange = (status: string) => {
+   824→    if (!lead || status === lead.status) return;
+   825→    if (status === "LOST") { setLostOpen(true); return; }
+   826→    patch({ status }, `Status updated — ${humanLabel(status)}`);
+   827→  };
+   828→
+   829→  const overdue = lead ? (isOverdueDate(lead.nextFollowUpAt) && !["WON", "LOST"].includes(lead.status)) : false;
+   830→  const showConvert = lead && canConvert && ["WON", "NEGOTIATION"].includes(lead.status) && !lead.convertedClientId;
+   831→
+   832→  const nextFollowUpOptions = useMemo(() => {
+   833→    const options: { label: string; value: string }[] = [];
+   834→    const now = new Date();
+   835→    const pad = (n: number) => String(n).padStart(2, "0");
+   836→    const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+   837→    const in1h = new Date(now.getTime() + 60 * 60 * 1000);
+   838→    const tomorrow9 = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9, 0, 0);
+   839→    const in3days = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 3, 10, 0, 0);
+   840→    const nextWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7, 10, 0, 0);
+   841→    options.push({ label: "In 1 hour", value: fmt(in1h) });
+   842→    options.push({ label: "Tomorrow 9:00 AM", value: fmt(tomorrow9) });
+   843→    options.push({ label: "In 3 days 10:00 AM", value: fmt(in3days) });
+   844→    options.push({ label: "Next week 10:00 AM", value: fmt(nextWeek) });
+   845→    options.push({ label: "Clear follow-up", value: "CLEAR" });
+   846→    return options;
+   847→  }, []);
+   848→
+   849→  return (
+   850→    <>
+   851→      <Sheet open={open} onOpenChange={onOpenChange}>
+   852→        <SheetContent side="right" className="w-full sm:max-w-[520px] p-0 flex flex-col">
+   853→          {loading && !lead && (
+   854→            <div className="p-5">
+   855→              <ListSkeleton rows={8} />
+   856→            </div>
+   857→          )}
+   858→          {!loading && error && (
+   859→            <div className="p-5"><ErrorState message={error} onRetry={load} /></div>
+   860→          )}
+   861→          {lead && (
+   862→            <>
+   863→              <SheetHeader className="border-b border-border pb-4">
+   864→                <div className="flex items-start justify-between gap-3 pr-8">
+   865→                  <div className="min-w-0">
+   866→                    <SheetTitle className="truncate text-base">{lead.companyName}</SheetTitle>
+   867→                    <SheetDescription className="text-xs">
+   868→                      {lead.leadNumber} · created {formatDate(lead.createdAt)}
+   869→                    </SheetDescription>
+   870→                  </div>
+   871→                  <div className="flex flex-col items-end gap-1.5">
+   872→                    <StatusBadge status={lead.status} />
+   873→                    <PriorityBadge priority={lead.priority} />
+   874→                  </div>
+   875→                </div>
+   876→                {lead.convertedClient && (
+   877→                  <button
+   878→                    onClick={() => { onOpenChange(false); navigate("crm/clients"); }}
+   879→                    className="mt-2 inline-flex items-center gap-1.5 text-xs text-emerald-300 hover:underline w-fit"
+   880→                  >
+   881→                    <ArrowUpRight className="w-3.5 h-3.5" />
+   882→                    Converted to {lead.convertedClient.companyName} ({lead.convertedClient.clientNumber})
+   883→                  </button>
+   884→                )}
+   885→              </SheetHeader>
+   886→
+   887→              <Tabs defaultValue="overview" className="flex-1 flex flex-col min-h-0">
+   888→                <TabsList className="mx-4 mt-3 w-fit">
+   889→                  <TabsTrigger value="overview">Overview</TabsTrigger>
+   890→                  <TabsTrigger value="timeline">Timeline</TabsTrigger>
+   891→                  <TabsTrigger value="followups">Follow-ups{lead.followUps.length > 0 ? ` (${lead.followUps.length})` : ""}</TabsTrigger>
+   892→                </TabsList>
+   893→
+   894→                <ScrollArea className="flex-1 min-h-0">
+   895→                  {/* Overview */}
+   896→                  <TabsContent value="overview" className="px-5 py-4 mt-0">
+   897→                    {(canEdit || showConvert) && (
+   898→                      <div className="flex flex-wrap gap-2 mb-4">
+   899→                        {canEdit && (
+   900→                          <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
+   901→                            <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+   902→                          </Button>
+   903→                        )}
+   904→                        {showConvert && (
+   905→                          <Button size="sm" onClick={() => setConvertOpen(true)}>
+   906→                            <ArrowUpRight className="w-3.5 h-3.5 mr-1.5" /> Convert to client
+   907→                          </Button>
+   908→                        )}
+   909→                      </div>
+   910→                    )}
+   911→
+   912→                    {canEdit && (
+   913→                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+   914→                        <Field label="Status">
+   915→                          <Select value={lead.status} onValueChange={onStatusChange} disabled={busy}>
+   916→                            <SelectTrigger><SelectValue /></SelectTrigger>
+   917→                            <SelectContent>
+   918→                              {LEAD_STATUSES.map((s) => <SelectItem key={s} value={s}>{humanLabel(s)}</SelectItem>)}
+   919→                            </SelectContent>
+   920→                          </Select>
+   921→                        </Field>
+   922→                        {permissions.includes("team.view") ? (
+   923→                          <Field label="Assigned to">
+   924→                            <AssignSelect
+   925→                              key={lead.assignedToId || "none"}
+   926→                              currentId={lead.assignedToId}
+   927→                              disabled={busy}
+   928→                              onChange={(id) => patch({ assignedToId: id || null }, id ? "Lead reassigned" : "Lead unassigned")}
+   929→                            />
+   930→                          </Field>
+   931→                        ) : (
+   932→                          <Field label="Assigned to">
+   933→                            <div className="h-9 flex items-center gap-2 text-sm">
+   934→                              {lead.assignedTo ? (
+   935→                                <><UserAvatar name={lead.assignedTo.name} color={lead.assignedTo.avatarColor} size={24} /> {lead.assignedTo.name}</>
+   936→                              ) : "Unassigned"}
+   937→                            </div>
+   938→                          </Field>
+   939→                        )}
+   940→                      </div>
+   941→                    )}
+   942→                    {!canEdit && lead.assignedTo && (
+   943→                      <DetailRow label="Assigned to" value={
+   944→                        <span className="inline-flex items-center gap-2">
+   945→                          <UserAvatar name={lead.assignedTo.name} color={lead.assignedTo.avatarColor} size={22} /> {lead.assignedTo.name}
+   946→                        </span>
+   947→                      } />
+   948→                    )}
+   949→
+   950→                    <Separator className="my-3" />
+   951→                    <div className="divide-y divide-border/60">
+   952→                      <DetailRow label="Contact person" value={lead.contactName} />
+   953→                      <DetailRow label="Phone" value={<span dir="ltr">{lead.phone}</span>} />
+   954→                      <DetailRow label="Email" value={lead.email ? <span dir="ltr">{lead.email}</span> : "—"} />
+   955→                      <DetailRow label="Website" value={lead.website ? <span dir="ltr" className="break-all">{lead.website}</span> : "—"} />
+   956→                      <DetailRow label="Industry" value={lead.industry || "—"} />
+   957→                      <DetailRow label="Location" value={lead.location || "—"} />
+   958→                      <DetailRow label="Source" value={humanLabel(lead.source)} />
+   959→                      <DetailRow label="Service interest" value={lead.serviceInterest || "—"} />
+   960→                      <DetailRow label="Estimated budget" value={lead.estimatedBudget != null ? formatCurrency(lead.estimatedBudget) : "—"} />
+   961→                      <DetailRow
+   962→                        label="Next follow-up"
+   963→                        value={
+   964→                          lead.nextFollowUpAt
+   965→                            ? <span className={cn(overdue && "text-rose-300 font-medium")}>{formatDateTime(lead.nextFollowUpAt)}{overdue ? " · overdue" : ""}</span>
+   966→                            : "—"
+   967→                        }
+   968→                      />
+   969→                      {lead.status === "LOST" && <DetailRow label="Lost reason" value={lead.lostReason || "—"} />}
+   970→                      {canEdit && (
+   971→                        <DetailRow
+   972→                          label="Quick follow-up"
+   973→                          value={
+   974→                            <Select
+   975→                              value=""
+   976→                              onValueChange={(v) => {
+   977→                                if (v === "CLEAR") patch({ nextFollowUpAt: null }, "Follow-up cleared");
+   978→                                else patch({ nextFollowUpAt: new Date(v).toISOString() }, "Follow-up scheduled");
+   979→                              }}
+   980→                              disabled={busy}
+   981→                            >
+   982→                              <SelectTrigger className="h-8 w-[180px]"><SelectValue placeholder="Schedule…" /></SelectTrigger>
+   983→                              <SelectContent>
+   984→                                {nextFollowUpOptions.map((o) => (
+   985→                                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+   986→                                ))}
+   987→                              </SelectContent>
+   988→                            </Select>
+   989→                          }
+   990→                        />
+   991→                      )}
+   992→                    </div>
+   993→                    {lead.notes && (
+   994→                      <>
+   995→                        <Separator className="my-3" />
+   996→                        <p className="text-xs text-muted-foreground mb-1.5">Notes</p>
+   997→                        <p className="text-sm whitespace-pre-wrap">{lead.notes}</p>
+   998→                      </>
+   999→                    )}
+  1000→                  </TabsContent>
+  1001→
+  1002→                  {/* Timeline */}
+  1003→                  <TabsContent value="timeline" className="px-5 py-4 mt-0">
+  1004→                    <ActivityTimeline items={data?.activities ?? []} emptyText="No activity for this lead yet." />
+  1005→                  </TabsContent>
+  1006→
+  1007→                  {/* Follow-ups */}
+  1008→                  <TabsContent value="followups" className="px-5 py-4 mt-0 space-y-3">
+  1009→                    <div className="flex items-center justify-between">
+  1010→                      <p className="text-sm font-medium">{lead.followUps.length} follow-up{lead.followUps.length === 1 ? "" : "s"}</p>
+  1011→                      <DrawerFollowUpForm leadId={lead.id} onCreated={() => { load(); onChanged(); }} />
+  1012→                    </div>
+  1013→                    {lead.followUps.length === 0 ? (
+  1014→                      <p className="text-sm text-muted-foreground text-center py-8">No follow-ups scheduled yet.</p>
+  1015→                    ) : (
+  1016→                      lead.followUps.map((f) => (
+  1017→                        <div key={f.id} className="rounded-lg border border-border p-3 bg-card/50">
+  1018→                          <div className="flex items-start justify-between gap-2">
+  1019→                            <p className="text-sm font-medium">{f.title}</p>
+  1020→                            <StatusBadge status={f.status} />
+  1021→                          </div>
+  1022→                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-xs text-muted-foreground">
+  1023→                            <span className={cn(isOverdueDate(f.dueAt) && f.status === "PENDING" && "text-rose-300 font-medium")}>
+  1024→                              {formatDateTime(f.dueAt)}{isOverdueDate(f.dueAt) && f.status === "PENDING" ? " · overdue" : ""}
+  1025→                            </span>
+  1026→                            <PriorityBadge priority={f.priority} />
+  1027→                            {f.assignedTo && (
+  1028→                              <span className="inline-flex items-center gap-1.5">
+  1029→                                <UserAvatar name={f.assignedTo.name} color={f.assignedTo.avatarColor} size={18} />
+  1030→                                {f.assignedTo.name}
+  1031→                              </span>
+  1032→                            )}
+  1033→                          </div>
+  1034→                        </div>
+  1035→                      ))
+  1036→                    )}
+  1037→                  </TabsContent>
+  1038→                </ScrollArea>
+  1039→              </Tabs>
+  1040→            </>
+  1041→          )}
+  1042→        </SheetContent>
+  1043→      </Sheet>
+  1044→
+  1045→      {lead && (
+  1046→        <>
+  1047→          <LeadFormDialog
+  1048→            open={editOpen}
+  1049→            onOpenChange={setEditOpen}
+  1050→            lead={lead}
+  1051→            onSaved={() => { load(); onChanged(); }}
+  1052→          />
+  1053→          <ConvertLeadDialog
+  1054→            open={convertOpen}
+  1055→            onOpenChange={setConvertOpen}
+  1056→            lead={lead}
+  1057→            onConverted={() => { load(); onChanged(); onOpenChange(false); navigate("crm/clients"); }}
+  1058→          />
+  1059→          <LostReasonDialog
+  1060→            open={lostOpen}
+  1061→            onOpenChange={setLostOpen}
+  1062→            companyName={lead.companyName}
+  1063→            onConfirm={(reason) => {
+  1064→              setLostOpen(false);
+  1065→              patch({ status: "LOST", lostReason: reason }, "Status updated — Lost");
+  1066→            }}
+  1067→          />
+  1068→        </>
+  1069→      )}
+  1070→    </>
+  1071→  );
+  1072→}
+  1073→
+  1074→/** Assignee select used inside the drawer (loads team on mount). */
+  1075→function AssignSelect({
+  1076→  currentId, onChange, disabled,
+  1077→}: {
+  1078→  currentId: string | null;
+  1079→  onChange: (id: string | null) => void;
+  1080→  disabled?: boolean;
+  1081→}) {
+  1082→  const { team, hasAccess } = useTeam();
+  1083→  const value = currentId || "UNASSIGNED";
+  1084→  if (!hasAccess) {
+  1085→    return <span className="text-sm text-muted-foreground h-9 flex items-center">—</span>;
+  1086→  }
+  1087→  return (
+  1088→    <Select value={value} onValueChange={(v) => onChange(v === "UNASSIGNED" ? null : v)} disabled={disabled}>
+  1089→      <SelectTrigger><SelectValue /></SelectTrigger>
+  1090→      <SelectContent>
+  1091→        <SelectItem value="UNASSIGNED">Unassigned</SelectItem>
+  1092→        {team.map((m) => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
+  1093→      </SelectContent>
+  1094→    </Select>
+  1095→  );
+  1096→}
+  1097→

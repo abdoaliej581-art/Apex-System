@@ -1,0 +1,1113 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useMemo, useState } from "react";
+     4→import { useSession } from "next-auth/react";
+     5→import { api, ApiClientError, formatCurrency, formatDate, relativeTime, initials } from "@/lib/api-client";
+     6→import { useToast } from "@/hooks/use-toast";
+     7→import { PageHeader, EmptyState, ErrorState, StatusBadge, PriorityBadge, Field } from "@/components/shared";
+     8→import { TaskDetailSheet, UserAvatar } from "./tasks";
+     9→import { Button } from "@/components/ui/button";
+    10→import { Input } from "@/components/ui/input";
+    11→import { Textarea } from "@/components/ui/textarea";
+    12→import { Skeleton } from "@/components/ui/skeleton";
+    13→import { Progress } from "@/components/ui/progress";
+    14→import { Checkbox } from "@/components/ui/checkbox";
+    15→import { Separator } from "@/components/ui/separator";
+    16→import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+    17→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+    18→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+    19→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    20→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+    21→import {
+    22→  Activity, ArrowRightLeft, Building2, CalendarClock, FolderKanban, ListTodo,
+    23→  PencilLine, Plus, PlusCircle, RefreshCw, Trash2, UserPlus, X,
+    24→} from "lucide-react";
+    25→import { cn } from "@/lib/utils";
+    26→
+    27→// ============================= Types =============================
+    28→
+    29→type MiniUser = { id: string; name: string; avatarColor: string };
+    30→type ChecklistEntry = { text: string; isDone: boolean };
+    31→type Paged<T> = { items: T[]; total: number; page: number; pageSize: number };
+    32→
+    33→type ProjectItem = {
+    34→  id: string;
+    35→  projectNumber: string;
+    36→  name: string;
+    37→  description?: string | null;
+    38→  type: string;
+    39→  status: string;
+    40→  priority: string;
+    41→  budget?: number | null;
+    42→  progress: number;
+    43→  health: string;
+    44→  startDate?: string | null;
+    45→  deadline?: string | null;
+    46→  createdAt: string;
+    47→  client: { id: string; companyName: string };
+    48→  manager?: MiniUser | null;
+    49→  totalTasks: number;
+    50→  doneTasks: number;
+    51→  phasesCount: number;
+    52→  membersCount: number;
+    53→};
+    54→
+    55→type PhaseTask = {
+    56→  id: string;
+    57→  title: string;
+    58→  status: string;
+    59→  priority: string;
+    60→  dueDate?: string | null;
+    61→  assignee?: MiniUser | null;
+    62→};
+    63→
+    64→type ProjectDetail = {
+    65→  id: string;
+    66→  projectNumber: string;
+    67→  name: string;
+    68→  description?: string | null;
+    69→  type: string;
+    70→  status: string;
+    71→  priority: string;
+    72→  budget?: number | null;
+    73→  progress: number;
+    74→  health: string;
+    75→  startDate?: string | null;
+    76→  deadline?: string | null;
+    77→  createdAt: string;
+    78→  client: { id: string; companyName: string; clientNumber: string };
+    79→  manager?: (MiniUser & { title?: string | null }) | null;
+    80→  members: { id: string; role: string; user: MiniUser & { title?: string | null } }[];
+    81→  phases: { id: string; name: string; order: number; status: string; doneCount: number; tasks: PhaseTask[] }[];
+    82→  taskStats: { byStatus: Record<string, number>; total: number; done: number; open: number };
+    83→  invoices: { id: string; invoiceNumber: string; total: number; status: string; currency: string }[] | null;
+    84→  onboardingChecklist: ChecklistEntry[];
+    85→  completionChecklist: ChecklistEntry[];
+    86→  activities: { id: string; type: string; title: string; description?: string | null; actorName: string; actorColor: string; createdAt: string }[];
+    87→};
+    88→
+    89→type ProjectTypeConfig = { key: string; label: string; phases: string[] };
+    90→type ClientOption = { id: string; companyName: string };
+    91→type TeamMemberOption = MiniUser & { title?: string | null };
+    92→
+    93→// Fallback project types (mirrors seeded Settings — used when /api/settings is not permitted)
+    94→const FALLBACK_TYPES: ProjectTypeConfig[] = [
+    95→  { key: "BUSINESS_WEBSITE", label: "Business Website", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Testing", "Client Review", "Deployment", "Handover"] },
+    96→  { key: "ECOMMERCE", label: "E-commerce", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Payments Integration", "Testing", "Client Review", "Deployment", "Handover"] },
+    97→  { key: "WEB_APPLICATION", label: "Web Application", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Integration", "Testing", "Client Review", "Revisions", "Deployment", "Handover"] },
+    98→  { key: "CUSTOM_SOFTWARE", label: "Custom Software", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Integration", "Testing", "Client Review", "Revisions", "Deployment", "Handover"] },
+    99→  { key: "CRM", label: "CRM System", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Integration", "Testing", "Client Review", "Deployment", "Handover"] },
+   100→  { key: "DASHBOARD", label: "Dashboard", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Testing", "Client Review", "Deployment", "Handover"] },
+   101→  { key: "EDUCATIONAL_PLATFORM", label: "Educational Platform", phases: ["Discovery", "Requirements", "UI/UX", "Development", "Testing", "Client Review", "Deployment", "Handover"] },
+   102→  { key: "LANDING_PAGE", label: "Landing Page", phases: ["Requirements", "UI/UX", "Development", "Client Review", "Deployment"] },
+   103→  { key: "AUTOMATION_SYSTEM", label: "Automation System", phases: ["Discovery", "Requirements", "Development", "Testing", "Deployment", "Handover"] },
+   104→  { key: "MAINTENANCE", label: "Maintenance", phases: ["Assessment", "Execution", "Client Review"] },
+   105→];
+   106→
+   107→const PROJECT_STATUSES = ["PLANNING", "ACTIVE", "ON_HOLD", "REVIEW", "COMPLETED", "CANCELLED"];
+   108→const STATUS_TRANSITIONS: Record<string, string[]> = {
+   109→  PLANNING: ["PLANNING", "ACTIVE", "CANCELLED"],
+   110→  ACTIVE: ["ACTIVE", "PLANNING", "ON_HOLD", "REVIEW", "COMPLETED", "CANCELLED"],
+   111→  ON_HOLD: ["ON_HOLD", "ACTIVE", "REVIEW", "COMPLETED", "CANCELLED"],
+   112→  REVIEW: ["REVIEW", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED"],
+   113→  COMPLETED: ["COMPLETED", "ACTIVE"],
+   114→  CANCELLED: ["CANCELLED", "PLANNING", "ACTIVE"],
+   115→};
+   116→const MEMBER_ROLES = ["MEMBER", "MANAGER", "REVIEWER", "QA"];
+   117→
+   118→const HEALTH_STYLES: Record<string, { dot: string; text: string }> = {
+   119→  ON_TRACK: { dot: "bg-emerald-400", text: "text-emerald-300" },
+   120→  AT_RISK: { dot: "bg-amber-400", text: "text-amber-300" },
+   121→  DELAYED: { dot: "bg-rose-400", text: "text-rose-300" },
+   122→};
+   123→
+   124→function HealthBadge({ health }: { health: string }) {
+   125→  const s = HEALTH_STYLES[health] ?? HEALTH_STYLES.ON_TRACK;
+   126→  return (
+   127→    <span className={cn("inline-flex items-center gap-1.5 text-[11px] font-medium", s.text)}>
+   128→      <span className={cn("w-2 h-2 rounded-full", s.dot)} />
+   129→      {health.replace(/_/g, " ")}
+   130→    </span>
+   131→  );
+   132→}
+   133→
+   134→function deadlineMeta(deadline?: string | null, status?: string): { text: string; cls: string } {
+   135→  if (!deadline) return { text: "No deadline", cls: "text-muted-foreground" };
+   136→  const d = new Date(deadline);
+   137→  d.setHours(0, 0, 0, 0);
+   138→  const today = new Date();
+   139→  today.setHours(0, 0, 0, 0);
+   140→  const days = Math.round((d.getTime() - today.getTime()) / 86400000);
+   141→  const urgent = !!status && !["COMPLETED", "CANCELLED"].includes(status) && days < 7;
+   142→  return { text: formatDate(deadline), cls: urgent ? "text-rose-300 font-medium" : "text-muted-foreground" };
+   143→}
+   144→
+   145→function typeLabel(key: string, types: ProjectTypeConfig[]): string {
+   146→  return types.find((t) => t.key === key)?.label ?? key.replace(/_/g, " ");
+   147→}
+   148→
+   149→function extractClients(data: unknown): ClientOption[] {
+   150→  if (Array.isArray(data)) return data as ClientOption[];
+   151→  if (data && typeof data === "object") {
+   152→    const obj = data as Record<string, unknown>;
+   153→    if (Array.isArray(obj.items)) return obj.items as ClientOption[];
+   154→    if (Array.isArray(obj.clients)) return obj.clients as ClientOption[];
+   155→  }
+   156→  return [];
+   157→}
+   158→
+   159→// ============================= New Project Dialog =============================
+   160→
+   161→function NewProjectDialog({
+   162→  open, onOpenChange, onCreated, navigate,
+   163→}: {
+   164→  open: boolean;
+   165→  onOpenChange: (v: boolean) => void;
+   166→  onCreated: () => void;
+   167→  navigate: (p: string) => void;
+   168→}) {
+   169→  const { toast } = useToast();
+   170→  const [name, setName] = useState("");
+   171→  const [description, setDescription] = useState("");
+   172→  const [clients, setClients] = useState<ClientOption[] | null>(null);
+   173→  const [clientUnavailable, setClientUnavailable] = useState(false);
+   174→  const [clientId, setClientId] = useState("none");
+   175→  const [manualClientId, setManualClientId] = useState("");
+   176→  const [types, setTypes] = useState<ProjectTypeConfig[]>(FALLBACK_TYPES);
+   177→  const [type, setType] = useState("BUSINESS_WEBSITE");
+   178→  const [team, setTeam] = useState<TeamMemberOption[]>([]);
+   179→  const [teamUnavailable, setTeamUnavailable] = useState(false);
+   180→  const [managerId, setManagerId] = useState("none");
+   181→  const [budget, setBudget] = useState("");
+   182→  const [startDate, setStartDate] = useState("");
+   183→  const [deadline, setDeadline] = useState("");
+   184→  const [priority, setPriority] = useState("MEDIUM");
+   185→  const [saving, setSaving] = useState(false);
+   186→
+   187→  // Load dialog data (degrade gracefully per source)
+   188→  useEffect(() => {
+   189→    if (!open) return;
+   190→    setName(""); setDescription(""); setClientId("none"); setManualClientId("");
+   191→    setType("BUSINESS_WEBSITE"); setManagerId("none"); setBudget("");
+   192→    setStartDate(""); setDeadline(""); setPriority("MEDIUM");
+   193→    setClientUnavailable(false); setTeamUnavailable(false);
+   194→
+   195→    api.get<unknown>("/api/clients?pageSize=100")
+   196→      .then((d) => {
+   197→        const list = extractClients(d).filter((c) => c && typeof c.id === "string");
+   198→        setClients(list);
+   199→        if (list.length === 0) setClientUnavailable(true);
+   200→      })
+   201→      .catch(() => { setClients([]); setClientUnavailable(true); });
+   202→
+   203→    api.get<{ settings: Record<string, unknown> }>("/api/settings")
+   204→      .then((d) => {
+   205→        const projectsSetting = d.settings?.projects as { types?: ProjectTypeConfig[] } | undefined;
+   206→        if (projectsSetting && Array.isArray(projectsSetting.types) && projectsSetting.types.length > 0) {
+   207→          setTypes(projectsSetting.types);
+   208→        }
+   209→      })
+   210→      .catch(() => setTypes(FALLBACK_TYPES)); // no settings.manage → hardcoded defaults
+   211→
+   212→    api.get<{ team: TeamMemberOption[] }>("/api/team")
+   213→      .then((d) => setTeam(d.team))
+   214→      .catch(() => setTeamUnavailable(true));
+   215→  }, [open]);
+   216→
+   217→  const submit = async () => {
+   218→    const resolvedClientId = clientUnavailable ? manualClientId.trim() : clientId === "none" ? "" : clientId;
+   219→    if (!name.trim() || !resolvedClientId) return;
+   220→    setSaving(true);
+   221→    try {
+   222→      await api.post("/api/projects", {
+   223→        name: name.trim(),
+   224→        clientId: resolvedClientId,
+   225→        type,
+   226→        managerId: managerId === "none" ? undefined : managerId,
+   227→        description: description.trim() || undefined,
+   228→        budget: budget ? Number(budget) : undefined,
+   229→        priority,
+   230→        startDate: startDate || undefined,
+   231→        deadline: deadline || undefined,
+   232→      });
+   233→      toast({ title: "Project created", description: `${name.trim()} is now in planning.` });
+   234→      onOpenChange(false);
+   235→      onCreated();
+   236→    } catch (e) {
+   237→      toast({
+   238→        title: "Could not create project",
+   239→        description: e instanceof ApiClientError ? e.message : undefined,
+   240→        variant: "destructive",
+   241→      });
+   242→    } finally {
+   243→      setSaving(false);
+   244→    }
+   245→  };
+   246→
+   247→  return (
+   248→    <Dialog open={open} onOpenChange={onOpenChange}>
+   249→      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto apex-scroll">
+   250→        <DialogHeader>
+   251→          <DialogTitle>New project</DialogTitle>
+   252→        </DialogHeader>
+   253→        <div className="space-y-3.5 py-1">
+   254→          <Field label="Project name" required>
+   255→            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Nile Commerce Platform" />
+   256→          </Field>
+   257→
+   258→          {clientUnavailable ? (
+   259→            <Field
+   260→              label="Client ID" required
+   261→              hint="Client list is unavailable (missing clients.view or the CRM module is not ready). Paste a Client ID from the CRM module."
+   262→            >
+   263→              <Input value={manualClientId} onChange={(e) => setManualClientId(e.target.value)} placeholder="e.g. cm5x… (APX-CLT-0001 ID)" />
+   264→            </Field>
+   265→          ) : (
+   266→            <Field label="Client" required>
+   267→              <Select value={clientId} onValueChange={setClientId}>
+   268→                <SelectTrigger className="h-9"><SelectValue placeholder="Select client" /></SelectTrigger>
+   269→                <SelectContent>
+   270→                  <SelectItem value="none" disabled>Select a client</SelectItem>
+   271→                  {(clients ?? []).map((c) => (
+   272→                    <SelectItem key={c.id} value={c.id}>{c.companyName}</SelectItem>
+   273→                  ))}
+   274→                </SelectContent>
+   275→              </Select>
+   276→            </Field>
+   277→          )}
+   278→
+   279→          <Field label="Project type" hint="Phases are generated automatically from the type template.">
+   280→            <Select value={type} onValueChange={setType}>
+   281→              <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   282→              <SelectContent>
+   283→                {types.map((t) => <SelectItem key={t.key} value={t.key}>{t.label}</SelectItem>)}
+   284→              </SelectContent>
+   285→            </Select>
+   286→          </Field>
+   287→
+   288→          <Field label="Manager" hint={teamUnavailable ? "Team list unavailable — manager can be assigned later." : undefined}>
+   289→            <Select value={managerId} onValueChange={setManagerId} disabled={teamUnavailable}>
+   290→              <SelectTrigger className="h-9"><SelectValue placeholder="No manager" /></SelectTrigger>
+   291→              <SelectContent>
+   292→                <SelectItem value="none">No manager</SelectItem>
+   293→                {team.map((m) => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
+   294→              </SelectContent>
+   295→            </Select>
+   296→          </Field>
+   297→
+   298→          <div className="grid grid-cols-2 gap-3">
+   299→            <Field label="Budget (EGP)">
+   300→              <Input type="number" min="0" value={budget} onChange={(e) => setBudget(e.target.value)} className="h-9" placeholder="0" />
+   301→            </Field>
+   302→            <Field label="Priority">
+   303→              <Select value={priority} onValueChange={setPriority}>
+   304→                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   305→                <SelectContent>
+   306→                  {["LOW", "MEDIUM", "HIGH", "URGENT"].map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+   307→                </SelectContent>
+   308→              </Select>
+   309→            </Field>
+   310→          </div>
+   311→
+   312→          <div className="grid grid-cols-2 gap-3">
+   313→            <Field label="Start date">
+   314→              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-9" />
+   315→            </Field>
+   316→            <Field label="Deadline">
+   317→              <Input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} className="h-9" />
+   318→            </Field>
+   319→          </div>
+   320→
+   321→          <Field label="Description">
+   322→            <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="Scope summary, goals, notes…" />
+   323→          </Field>
+   324→        </div>
+   325→        <DialogFooter>
+   326→          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   327→          <Button disabled={!name.trim() || (clientUnavailable ? !manualClientId.trim() : clientId === "none") || saving} onClick={() => void submit()}>
+   328→            {saving ? "Creating…" : "Create project"}
+   329→          </Button>
+   330→        </DialogFooter>
+   331→      </DialogContent>
+   332→    </Dialog>
+   333→  );
+   334→}
+   335→
+   336→// ============================= Quick add task per phase =============================
+   337→
+   338→function QuickAddTask({
+   339→  projectId, phaseId, onAdded, canCreate,
+   340→}: {
+   341→  projectId: string;
+   342→  phaseId: string;
+   343→  onAdded: () => void;
+   344→  canCreate: boolean;
+   345→}) {
+   346→  const { toast } = useToast();
+   347→  const [title, setTitle] = useState("");
+   348→  const [busy, setBusy] = useState(false);
+   349→
+   350→  if (!canCreate) return null;
+   351→
+   352→  const add = async () => {
+   353→    if (!title.trim()) return;
+   354→    setBusy(true);
+   355→    try {
+   356→      await api.post("/api/tasks", { title: title.trim(), projectId, phaseId });
+   357→      setTitle("");
+   358→      toast({ title: "Task added to phase" });
+   359→      onAdded();
+   360→    } catch (e) {
+   361→      toast({
+   362→        title: "Could not add task",
+   363→        description: e instanceof ApiClientError ? e.message : undefined,
+   364→        variant: "destructive",
+   365→      });
+   366→    } finally {
+   367→      setBusy(false);
+   368→    }
+   369→  };
+   370→
+   371→  return (
+   372→    <div className="flex gap-1.5 mt-2">
+   373→      <Input
+   374→        value={title}
+   375→        onChange={(e) => setTitle(e.target.value)}
+   376→        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void add(); } }}
+   377→        placeholder="Quick add task…"
+   378→        className="h-8 text-xs"
+   379→      />
+   380→      <Button size="sm" variant="outline" className="h-8 px-2.5" disabled={!title.trim() || busy} onClick={() => void add()} aria-label="Add task">
+   381→        <Plus className="w-3.5 h-3.5" />
+   382→      </Button>
+   383→    </div>
+   384→  );
+   385→}
+   386→
+   387→// ============================= Project Detail Sheet =============================
+   388→
+   389→const ACTIVITY_ICONS: Record<string, React.ReactNode> = {
+   390→  CREATED: <PlusCircle className="w-3.5 h-3.5" />,
+   391→  STATUS_CHANGED: <ArrowRightLeft className="w-3.5 h-3.5" />,
+   392→  UPDATED: <PencilLine className="w-3.5 h-3.5" />,
+   393→  PROJECT: <FolderKanban className="w-3.5 h-3.5" />,
+   394→  TASK: <ListTodo className="w-3.5 h-3.5" />,
+   395→};
+   396→
+   397→function ChecklistSection({
+   398→  title, entries, onToggle,
+   399→}: {
+   400→  title: string;
+   401→  entries: ChecklistEntry[];
+   402→  onToggle: (index: number) => void;
+   403→}) {
+   404→  const done = entries.filter((e) => e.isDone).length;
+   405→  return (
+   406→    <div>
+   407→      <div className="flex items-center justify-between mb-2">
+   408→        <p className="text-sm font-medium">{title}</p>
+   409→        <span className="text-xs text-muted-foreground">
+   410→          {entries.length > 0 ? `${done}/${entries.length} · ${Math.round((done / entries.length) * 100)}%` : "Empty"}
+   411→        </span>
+   412→      </div>
+   413→      {entries.length > 0 && <Progress value={(done / entries.length) * 100} className="h-1.5 mb-3" />}
+   414→      <div className="space-y-1">
+   415→        {entries.map((entry, i) => (
+   416→          <label key={`${entry.text}-${i}`} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-accent/50 cursor-pointer">
+   417→            <Checkbox checked={entry.isDone} onCheckedChange={() => onToggle(i)} aria-label={`Toggle ${entry.text}`} />
+   418→            <span className={cn("text-sm", entry.isDone && "line-through text-muted-foreground")}>{entry.text}</span>
+   419→          </label>
+   420→        ))}
+   421→        {entries.length === 0 && (
+   422→          <p className="text-xs text-muted-foreground py-2">No checklist items yet.</p>
+   423→        )}
+   424→      </div>
+   425→    </div>
+   426→  );
+   427→}
+   428→
+   429→function ProjectDetailSheet({
+   430→  projectId, open, onOpenChange, onChanged, navigate,
+   431→}: {
+   432→  projectId: string | null;
+   433→  open: boolean;
+   434→  onOpenChange: (v: boolean) => void;
+   435→  onChanged?: () => void;
+   436→  navigate: (p: string) => void;
+   437→}) {
+   438→  const { data: session } = useSession();
+   439→  const me = session?.user;
+   440→  const { toast } = useToast();
+   441→  const [detail, setDetail] = useState<ProjectDetail | null>(null);
+   442→  const [loading, setLoading] = useState(false);
+   443→  const [tab, setTab] = useState("overview");
+   444→  const [team, setTeam] = useState<TeamMemberOption[]>([]);
+   445→  const [teamUnavailable, setTeamUnavailable] = useState(false);
+   446→  const [addUserId, setAddUserId] = useState("none");
+   447→  const [addRole, setAddRole] = useState("MEMBER");
+   448→  const [taskSheetId, setTaskSheetId] = useState<string | null>(null);
+   449→  const [taskSheetOpen, setTaskSheetOpen] = useState(false);
+   450→
+   451→  const canEdit = !!me?.permissions?.includes("projects.edit");
+   452→  const canAssign = !!me?.permissions?.includes("projects.assign");
+   453→  const canDelete = !!me?.permissions?.includes("projects.delete");
+   454→  const canCreateTasks = !!me?.permissions?.includes("tasks.create");
+   455→
+   456→  const loadDetail = useCallback(async () => {
+   457→    if (!projectId) return;
+   458→    setLoading(true);
+   459→    try {
+   460→      const d = await api.get<ProjectDetail>(`/api/projects/${projectId}`);
+   461→      setDetail(d);
+   462→    } catch (e) {
+   463→      toast({
+   464→        title: "Could not load project",
+   465→        description: e instanceof ApiClientError ? e.message : undefined,
+   466→        variant: "destructive",
+   467→      });
+   468→    } finally {
+   469→      setLoading(false);
+   470→    }
+   471→  }, [projectId, toast]);
+   472→
+   473→  useEffect(() => {
+   474→    if (open && projectId) {
+   475→      setTab("overview");
+   476→      void loadDetail();
+   477→    }
+   478→    if (!open) setDetail(null);
+   479→  }, [open, projectId, loadDetail]);
+   480→
+   481→  useEffect(() => {
+   482→    if (!open || team.length > 0 || teamUnavailable) return;
+   483→    api.get<{ team: TeamMemberOption[] }>("/api/team")
+   484→      .then((d) => setTeam(d.team))
+   485→      .catch(() => setTeamUnavailable(true));
+   486→  }, [open, team.length, teamUnavailable]);
+   487→
+   488→  const patchProject = useCallback(async (fields: Record<string, unknown>, opts?: { silent?: boolean }) => {
+   489→    if (!projectId) return;
+   490→    try {
+   491→      const d = await api.patch<{
+   492→        project: { status: string; health: string; progress: number; onboardingChecklist: ChecklistEntry[]; completionChecklist: ChecklistEntry[] };
+   493→      }>(`/api/projects/${projectId}`, fields);
+   494→      setDetail((prev) => prev ? {
+   495→        ...prev,
+   496→        status: d.project.status,
+   497→        health: d.project.health,
+   498→        progress: d.project.progress,
+   499→        onboardingChecklist: d.project.onboardingChecklist,
+   500→        completionChecklist: d.project.completionChecklist,
+   501→      } : prev);
+   502→      if (!opts?.silent) toast({ title: "Project updated" });
+   503→      onChanged?.();
+   504→    } catch (e) {
+   505→      toast({
+   506→        title: "Update failed",
+   507→        description: e instanceof ApiClientError ? e.message : undefined,
+   508→        variant: "destructive",
+   509→      });
+   510→      void loadDetail();
+   511→    }
+   512→  }, [projectId, toast, onChanged, loadDetail]);
+   513→
+   514→  const toggleChecklist = useCallback((kind: "onboardingChecklist" | "completionChecklist", index: number) => {
+   515→    if (!detail || !canEdit) return;
+   516→    const next = detail[kind].map((entry, i) => (i === index ? { ...entry, isDone: !entry.isDone } : entry));
+   517→    setDetail({ ...detail, [kind]: next });
+   518→    void patchProject({ [kind]: next }, { silent: true });
+   519→  }, [detail, canEdit, patchProject]);
+   520→
+   521→  const addMember = useCallback(async () => {
+   522→    if (!projectId || addUserId === "none") return;
+   523→    try {
+   524→      await api.post(`/api/projects/${projectId}/members`, { userId: addUserId, role: addRole });
+   525→      toast({ title: "Member added", description: "They have been notified." });
+   526→      setAddUserId("none");
+   527→      void loadDetail();
+   528→      onChanged?.();
+   529→    } catch (e) {
+   530→      toast({
+   531→        title: "Could not add member",
+   532→        description: e instanceof ApiClientError ? e.message : undefined,
+   533→        variant: "destructive",
+   534→      });
+   535→    }
+   536→  }, [projectId, addUserId, addRole, toast, loadDetail, onChanged]);
+   537→
+   538→  const removeMember = useCallback(async (userId: string) => {
+   539→    if (!projectId) return;
+   540→    try {
+   541→      await api.delete(`/api/projects/${projectId}/members?userId=${userId}`);
+   542→      toast({ title: "Member removed" });
+   543→      void loadDetail();
+   544→      onChanged?.();
+   545→    } catch (e) {
+   546→      toast({
+   547→        title: "Could not remove member",
+   548→        description: e instanceof ApiClientError ? e.message : undefined,
+   549→        variant: "destructive",
+   550→      });
+   551→    }
+   552→  }, [projectId, toast, loadDetail, onChanged]);
+   553→
+   554→  const archiveProject = useCallback(async () => {
+   555→    if (!projectId) return;
+   556→    try {
+   557→      await api.delete(`/api/projects/${projectId}`);
+   558→      toast({ title: "Project archived" });
+   559→      onOpenChange(false);
+   560→      onChanged?.();
+   561→    } catch (e) {
+   562→      toast({
+   563→        title: "Could not archive project",
+   564→        description: e instanceof ApiClientError ? e.message : undefined,
+   565→        variant: "destructive",
+   566→      });
+   567→    }
+   568→  }, [projectId, toast, onOpenChange, onChanged]);
+   569→
+   570→  const openTask = (taskId: string) => {
+   571→    setTaskSheetId(taskId);
+   572→    setTaskSheetOpen(true);
+   573→  };
+   574→
+   575→  const memberUserIds = new Set(detail?.members.map((m) => m.user.id) ?? []);
+   576→  const availableUsers = team.filter((u) => !memberUserIds.has(u.id));
+   577→
+   578→  return (
+   579→    <>
+   580→      <Sheet open={open} onOpenChange={onOpenChange}>
+   581→        <SheetContent side="right" className="w-full sm:max-w-[560px] p-0 flex flex-col gap-0">
+   582→          <SheetHeader className="p-5 pb-4 border-b border-border space-y-1">
+   583→            <SheetDescription className="text-xs text-muted-foreground font-mono flex items-center gap-2">
+   584→              {detail?.projectNumber ?? "—"}
+   585→              {detail && <StatusBadge status={detail.status} />}
+   586→              {detail && <PriorityBadge priority={detail.priority} />}
+   587→            </SheetDescription>
+   588→            <SheetTitle className="text-base leading-snug pr-6">{loading && !detail ? "Loading project…" : detail?.name ?? "Project"}</SheetTitle>
+   589→            {detail && (
+   590→              <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+   591→                <Building2 className="w-3 h-3" /> {detail.client.companyName}
+   592→                <span className="opacity-50">·</span>
+   593→                {typeLabel(detail.type, FALLBACK_TYPES)}
+   594→              </p>
+   595→            )}
+   596→          </SheetHeader>
+   597→
+   598→          {loading && !detail ? (
+   599→            <div className="p-5 space-y-3">
+   600→              {Array.from({ length: 7 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}
+   601→            </div>
+   602→          ) : !detail ? (
+   603→            <div className="p-5"><ErrorState message="Project could not be loaded." onRetry={() => void loadDetail()} /></div>
+   604→          ) : (
+   605→            <Tabs value={tab} onValueChange={setTab} className="flex flex-col flex-1 min-h-0">
+   606→              <div className="px-5 pt-3 border-b border-border">
+   607→                <TabsList className="bg-secondary/60 h-9">
+   608→                  <TabsTrigger value="overview" className="text-xs">Overview</TabsTrigger>
+   609→                  <TabsTrigger value="phases" className="text-xs">Phases &amp; Tasks</TabsTrigger>
+   610→                  <TabsTrigger value="members" className="text-xs">Members</TabsTrigger>
+   611→                  <TabsTrigger value="checklists" className="text-xs">Checklists</TabsTrigger>
+   612→                  <TabsTrigger value="activity" className="text-xs">Activity</TabsTrigger>
+   613→                </TabsList>
+   614→              </div>
+   615→
+   616→              <div className="flex-1 overflow-y-auto apex-scroll p-5">
+   617→                {/* ---------- Overview ---------- */}
+   618→                <TabsContent value="overview" className="mt-0 space-y-4 focus-visible:outline-none">
+   619→                  <div className="grid grid-cols-2 gap-3">
+   620→                    <Field label="Status">
+   621→                      {canEdit ? (
+   622→                        <Select value={detail.status} onValueChange={(v) => void patchProject({ status: v })}>
+   623→                          <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   624→                          <SelectContent>
+   625→                            {(STATUS_TRANSITIONS[detail.status] ?? PROJECT_STATUSES).map((s) => (
+   626→                              <SelectItem key={s} value={s}>{s.replace(/_/g, " ")}</SelectItem>
+   627→                            ))}
+   628→                          </SelectContent>
+   629→                        </Select>
+   630→                      ) : <StatusBadge status={detail.status} />}
+   631→                    </Field>
+   632→                    <Field label="Health">
+   633→                      {canEdit ? (
+   634→                        <Select value={detail.health} onValueChange={(v) => void patchProject({ health: v })}>
+   635→                          <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   636→                          <SelectContent>
+   637→                            {["ON_TRACK", "AT_RISK", "DELAYED"].map((h) => (
+   638→                              <SelectItem key={h} value={h}>{h.replace(/_/g, " ")}</SelectItem>
+   639→                            ))}
+   640→                          </SelectContent>
+   641→                        </Select>
+   642→                      ) : <HealthBadge health={detail.health} />}
+   643→                    </Field>
+   644→                  </div>
+   645→
+   646→                  <div>
+   647→                    <div className="flex items-center justify-between mb-1.5">
+   648→                      <p className="text-xs font-medium text-muted-foreground">PROGRESS</p>
+   649→                      <div className="flex items-center gap-2">
+   650→                        <span className="text-sm font-semibold">{detail.progress}%</span>
+   651→                        {canEdit && (
+   652→                          <Button
+   653→                            size="sm" variant="ghost" className="h-6 px-2 text-[11px] text-primary"
+   654→                            onClick={() => void patchProject({ recomputeProgress: true })}
+   655→                            title="Recompute from completed tasks"
+   656→                          >
+   657→                            <RefreshCw className="w-3 h-3 mr-1" /> Recompute
+   658→                          </Button>
+   659→                        )}
+   660→                      </div>
+   661→                    </div>
+   662→                    <Progress value={detail.progress} className="h-2" />
+   663→                    <p className="text-[11px] text-muted-foreground mt-1.5">
+   664→                      {detail.taskStats.done}/{detail.taskStats.total} tasks done · {detail.taskStats.open} open
+   665→                    </p>
+   666→                  </div>
+   667→
+   668→                  <Separator />
+   669→
+   670→                  <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+   671→                    <div>
+   672→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Client</p>
+   673→                      <p className="mt-0.5">{detail.client.companyName}</p>
+   674→                      <p className="text-[11px] text-muted-foreground">{detail.client.clientNumber}</p>
+   675→                    </div>
+   676→                    <div>
+   677→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Manager</p>
+   678→                      <div className="mt-0.5 flex items-center gap-2">
+   679→                        {detail.manager ? (
+   680→                          <>
+   681→                            <UserAvatar name={detail.manager.name} color={detail.manager.avatarColor} />
+   682→                            <span className="text-sm">{detail.manager.name}</span>
+   683→                          </>
+   684→                        ) : <span className="text-sm text-muted-foreground">No manager</span>}
+   685→                      </div>
+   686→                    </div>
+   687→                    <div>
+   688→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Start date</p>
+   689→                      <p className="mt-0.5">{formatDate(detail.startDate)}</p>
+   690→                    </div>
+   691→                    <div>
+   692→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Deadline</p>
+   693→                      <p className={cn("mt-0.5 flex items-center gap-1.5", deadlineMeta(detail.deadline, detail.status).cls)}>
+   694→                        <CalendarClock className="w-3.5 h-3.5" />
+   695→                        {deadlineMeta(detail.deadline, detail.status).text}
+   696→                      </p>
+   697→                    </div>
+   698→                    <div>
+   699→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Budget</p>
+   700→                      <p className="mt-0.5">{detail.budget != null ? formatCurrency(detail.budget) : "—"}</p>
+   701→                    </div>
+   702→                    <div>
+   703→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Team</p>
+   704→                      <p className="mt-0.5">{detail.members.length} members · {detail.phases.length} phases</p>
+   705→                    </div>
+   706→                  </div>
+   707→
+   708→                  {detail.description && (
+   709→                    <div>
+   710→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Description</p>
+   711→                      <p className="text-sm text-muted-foreground whitespace-pre-wrap">{detail.description}</p>
+   712→                    </div>
+   713→                  )}
+   714→
+   715→                  {detail.invoices && detail.invoices.length > 0 && (
+   716→                    <div>
+   717→                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">Recent invoices</p>
+   718→                      <div className="space-y-1.5">
+   719→                        {detail.invoices.map((inv) => (
+   720→                          <div key={inv.id} className="flex items-center justify-between gap-2 p-2 rounded-lg border border-border/70 text-sm">
+   721→                            <span className="font-mono text-xs">{inv.invoiceNumber}</span>
+   722→                            <div className="flex items-center gap-2">
+   723→                              <span className="text-xs">{formatCurrency(inv.total, inv.currency)}</span>
+   724→                              <StatusBadge status={inv.status} />
+   725→                            </div>
+   726→                          </div>
+   727→                        ))}
+   728→                      </div>
+   729→                    </div>
+   730→                  )}
+   731→
+   732→                  {canDelete && (
+   733→                    <AlertDialog>
+   734→                      <AlertDialogTrigger asChild>
+   735→                        <Button variant="outline" className="w-full text-destructive hover:text-destructive border-destructive/40">
+   736→                          <Trash2 className="w-4 h-4 mr-2" /> Archive project
+   737→                        </Button>
+   738→                      </AlertDialogTrigger>
+   739→                      <AlertDialogContent>
+   740→                        <AlertDialogHeader>
+   741→                          <AlertDialogTitle>Archive this project?</AlertDialogTitle>
+   742→                          <AlertDialogDescription>
+   743→                            “{detail.name}” will be hidden from the active list. Projects with open tasks cannot be archived.
+   744→                          </AlertDialogDescription>
+   745→                        </AlertDialogHeader>
+   746→                        <AlertDialogFooter>
+   747→                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+   748→                          <AlertDialogAction
+   749→                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+   750→                            onClick={() => void archiveProject()}
+   751→                          >
+   752→                            Archive
+   753→                          </AlertDialogAction>
+   754→                        </AlertDialogFooter>
+   755→                      </AlertDialogContent>
+   756→                    </AlertDialog>
+   757→                  )}
+   758→                </TabsContent>
+   759→
+   760→                {/* ---------- Phases & Tasks ---------- */}
+   761→                <TabsContent value="phases" className="mt-0 space-y-3 focus-visible:outline-none">
+   762→                  {detail.phases.length === 0 ? (
+   763→                    <EmptyState
+   764→                      icon={<FolderKanban className="w-5 h-5" />}
+   765→                      title="No phases"
+   766→                      description="This project was created without a type template."
+   767→                    />
+   768→                  ) : (
+   769→                    detail.phases.map((ph) => (
+   770→                      <div key={ph.id} className="rounded-lg border border-border overflow-hidden">
+   771→                        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-secondary/40">
+   772→                          <span className="text-sm font-medium">{ph.name}</span>
+   773→                          <div className="flex items-center gap-2">
+   774→                            <span className="text-[11px] text-muted-foreground">{ph.doneCount}/{ph.tasks.length} done</span>
+   775→                            <StatusBadge status={ph.status} />
+   776→                          </div>
+   777→                        </div>
+   778→                        <div className="divide-y divide-border/50">
+   779→                          {ph.tasks.map((t) => (
+   780→                            <button
+   781→                              key={t.id}
+   782→                              onClick={() => openTask(t.id)}
+   783→                              className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-accent/40 text-left transition-colors"
+   784→                            >
+   785→                              <div className="min-w-0">
+   786→                                <p className="text-sm truncate">{t.title}</p>
+   787→                                <p className="text-[10px] text-muted-foreground mt-0.5">
+   788→                                  {t.assignee?.name ?? "Unassigned"}
+   789→                                  {t.dueDate ? ` · due ${formatDate(t.dueDate)}` : ""}
+   790→                                </p>
+   791→                              </div>
+   792→                              <div className="flex items-center gap-1.5 shrink-0">
+   793→                                <PriorityBadge priority={t.priority} />
+   794→                                <StatusBadge status={t.status} />
+   795→                              </div>
+   796→                            </button>
+   797→                          ))}
+   798→                          {ph.tasks.length === 0 && (
+   799→                            <p className="text-xs text-muted-foreground px-3 pt-2">No tasks in this phase yet.</p>
+   800→                          )}
+   801→                          <div className="px-3 pb-2.5">
+   802→                            <QuickAddTask projectId={detail.id} phaseId={ph.id} canCreate={canCreateTasks} onAdded={() => { void loadDetail(); onChanged?.(); }} />
+   803→                          </div>
+   804→                        </div>
+   805→                      </div>
+   806→                    ))
+   807→                  )}
+   808→                </TabsContent>
+   809→
+   810→                {/* ---------- Members ---------- */}
+   811→                <TabsContent value="members" className="mt-0 focus-visible:outline-none">
+   812→                  {canAssign && (
+   813→                    <div className="flex flex-col sm:flex-row gap-2 mb-4">
+   814→                      <Select value={addUserId} onValueChange={setAddUserId} disabled={teamUnavailable}>
+   815→                        <SelectTrigger className="h-9 flex-1"><SelectValue placeholder="Select teammate" /></SelectTrigger>
+   816→                        <SelectContent>
+   817→                          <SelectItem value="none" disabled>Select teammate</SelectItem>
+   818→                          {availableUsers.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
+   819→                        </SelectContent>
+   820→                      </Select>
+   821→                      <Select value={addRole} onValueChange={setAddRole}>
+   822→                        <SelectTrigger className="h-9 sm:w-32"><SelectValue /></SelectTrigger>
+   823→                        <SelectContent>
+   824→                          {MEMBER_ROLES.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+   825→                        </SelectContent>
+   826→                      </Select>
+   827→                      <Button className="h-9" disabled={addUserId === "none"} onClick={() => void addMember()}>
+   828→                        <UserPlus className="w-4 h-4 mr-1.5" /> Add
+   829→                      </Button>
+   830→                    </div>
+   831→                  )}
+   832→                  {canAssign && teamUnavailable && (
+   833→                    <p className="text-[11px] text-muted-foreground mb-3">
+   834→                      Team list requires the team.view permission — ask an admin to manage members.
+   835→                    </p>
+   836→                  )}
+   837→                  <div className="space-y-1.5">
+   838→                    {detail.members.map((m) => (
+   839→                      <div key={m.id} className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-border/70">
+   840→                        <div className="flex items-center gap-3 min-w-0">
+   841→                          <UserAvatar name={m.user.name} color={m.user.avatarColor} className="w-8 h-8 text-[11px]" />
+   842→                          <div className="min-w-0">
+   843→                            <p className="text-sm font-medium truncate">{m.user.name}</p>
+   844→                            <p className="text-[11px] text-muted-foreground truncate">{m.user.title ?? "—"}</p>
+   845→                          </div>
+   846→                        </div>
+   847→                        <div className="flex items-center gap-2 shrink-0">
+   848→                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-secondary border border-border text-muted-foreground">
+   849→                            {m.role}
+   850→                          </span>
+   851→                          {canAssign && (
+   852→                            <button
+   853→                              onClick={() => void removeMember(m.user.id)}
+   854→                              className="text-muted-foreground hover:text-destructive transition-colors"
+   855→                              aria-label={`Remove ${m.user.name}`}
+   856→                            >
+   857→                              <X className="w-4 h-4" />
+   858→                            </button>
+   859→                          )}
+   860→                        </div>
+   861→                      </div>
+   862→                    ))}
+   863→                  </div>
+   864→                </TabsContent>
+   865→
+   866→                {/* ---------- Checklists ---------- */}
+   867→                <TabsContent value="checklists" className="mt-0 space-y-6 focus-visible:outline-none">
+   868→                  <ChecklistSection
+   869→                    title="Onboarding"
+   870→                    entries={detail.onboardingChecklist}
+   871→                    onToggle={(i) => toggleChecklist("onboardingChecklist", i)}
+   872→                  />
+   873→                  <Separator />
+   874→                  <ChecklistSection
+   875→                    title="Completion"
+   876→                    entries={detail.completionChecklist}
+   877→                    onToggle={(i) => toggleChecklist("completionChecklist", i)}
+   878→                  />
+   879→                  {!canEdit && (
+   880→                    <p className="text-[11px] text-muted-foreground">You need projects.edit permission to update checklists.</p>
+   881→                  )}
+   882→                </TabsContent>
+   883→
+   884→                {/* ---------- Activity ---------- */}
+   885→                <TabsContent value="activity" className="mt-0 focus-visible:outline-none">
+   886→                  {detail.activities.length === 0 ? (
+   887→                    <EmptyState icon={<Activity className="w-5 h-5" />} title="No activity yet" description="Changes to this project will appear here." />
+   888→                  ) : (
+   889→                    <div className="space-y-4">
+   890→                      {detail.activities.map((a) => (
+   891→                        <div key={a.id} className="flex gap-3">
+   892→                          <div className="w-7 h-7 rounded-full bg-secondary border border-border flex items-center justify-center shrink-0 text-primary">
+   893→                            {ACTIVITY_ICONS[a.type] ?? <Activity className="w-3.5 h-3.5" />}
+   894→                          </div>
+   895→                          <div className="min-w-0 flex-1 border-b border-border/40 pb-3">
+   896→                            <p className="text-sm leading-snug">{a.title}</p>
+   897→                            {a.description && <p className="text-xs text-muted-foreground mt-0.5">{a.description}</p>}
+   898→                            <p className="text-[11px] text-muted-foreground mt-1">
+   899→                              <span
+   900→                                className="inline-flex w-4 h-4 rounded-full items-center justify-center text-[8px] font-bold mr-1 border align-middle"
+   901→                                style={{ backgroundColor: `${a.actorColor}22`, color: a.actorColor, borderColor: `${a.actorColor}55` }}
+   902→                              >
+   903→                                {initials(a.actorName)}
+   904→                              </span>
+   905→                              {a.actorName} · {relativeTime(a.createdAt)}
+   906→                            </p>
+   907→                          </div>
+   908→                        </div>
+   909→                      ))}
+   910→                    </div>
+   911→                  )}
+   912→                </TabsContent>
+   913→              </div>
+   914→            </Tabs>
+   915→          )}
+   916→        </SheetContent>
+   917→      </Sheet>
+   918→
+   919→      <TaskDetailSheet
+   920→        taskId={taskSheetId}
+   921→        open={taskSheetOpen}
+   922→        onOpenChange={setTaskSheetOpen}
+   923→        onChanged={() => { void loadDetail(); onChanged?.(); }}
+   924→        navigate={navigate}
+   925→      />
+   926→    </>
+   927→  );
+   928→}
+   929→
+   930→// ============================= Projects View =============================
+   931→
+   932→export function ProjectsView({ navigate }: { navigate: (p: string) => void }) {
+   933→  const { data: session } = useSession();
+   934→  const me = session?.user;
+   935→  const { toast } = useToast();
+   936→  const [projects, setProjects] = useState<ProjectItem[]>([]);
+   937→  const [loading, setLoading] = useState(true);
+   938→  const [error, setError] = useState(false);
+   939→  const [reloadKey, setReloadKey] = useState(0);
+   940→  const [newOpen, setNewOpen] = useState(false);
+   941→  const [detailId, setDetailId] = useState<string | null>(null);
+   942→  const [detailOpen, setDetailOpen] = useState(false);
+   943→  const [searchDraft, setSearchDraft] = useState("");
+   944→  const [statusFilter, setStatusFilter] = useState("all");
+   945→
+   946→  const canCreate = !!me?.permissions?.includes("projects.create");
+   947→
+   948→  const load = useCallback(async () => {
+   949→    setLoading(true);
+   950→    setError(false);
+   951→    try {
+   952→      const d = await api.get<Paged<ProjectItem>>("/api/projects?pageSize=100");
+   953→      setProjects(d.items);
+   954→    } catch (e) {
+   955→      setError(true);
+   956→      if (e instanceof ApiClientError && e.status === 403) {
+   957→        toast({ title: "Access denied", description: "You do not have permission to view projects.", variant: "destructive" });
+   958→      }
+   959→    } finally {
+   960→      setLoading(false);
+   961→    }
+   962→  }, [toast]);
+   963→
+   964→  useEffect(() => { void load(); }, [load, reloadKey]);
+   965→
+   966→  const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
+   967→
+   968→  const stats = useMemo(() => {
+   969→    const isOpen = (p: ProjectItem) => !["COMPLETED", "CANCELLED"].includes(p.status);
+   970→    return {
+   971→      active: projects.filter((p) => p.status === "ACTIVE").length,
+   972→      onTrack: projects.filter((p) => p.health === "ON_TRACK" && isOpen(p)).length,
+   973→      atRisk: projects.filter((p) => p.health === "AT_RISK").length,
+   974→      delayed: projects.filter((p) => p.health === "DELAYED").length,
+   975→    };
+   976→  }, [projects]);
+   977→
+   978→  const filtered = useMemo(() => {
+   979→    const q = searchDraft.trim().toLowerCase();
+   980→    return projects.filter((p) => {
+   981→      if (statusFilter !== "all" && p.status !== statusFilter) return false;
+   982→      if (q && !p.name.toLowerCase().includes(q) && !p.projectNumber.toLowerCase().includes(q) && !p.client.companyName.toLowerCase().includes(q)) return false;
+   983→      return true;
+   984→    });
+   985→  }, [projects, searchDraft, statusFilter]);
+   986→
+   987→  return (
+   988→    <div>
+   989→      <PageHeader
+   990→        title="Projects"
+   991→        description="Client delivery at a glance — health, progress, phases and deadlines."
+   992→        actions={
+   993→          canCreate ? (
+   994→            <Button onClick={() => setNewOpen(true)}>
+   995→              <Plus className="w-4 h-4 mr-2" /> New Project
+   996→            </Button>
+   997→          ) : undefined
+   998→        }
+   999→      />
+  1000→
+  1001→      {/* Header stats mini-row */}
+  1002→      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+  1003→        {([
+  1004→          { label: "Active", value: stats.active, dot: "bg-emerald-400" },
+  1005→          { label: "On track", value: stats.onTrack, dot: "bg-cyan-400" },
+  1006→          { label: "At risk", value: stats.atRisk, dot: "bg-amber-400" },
+  1007→          { label: "Delayed", value: stats.delayed, dot: "bg-rose-400" },
+  1008→        ] as const).map((s) => (
+  1009→          <div key={s.label} className="apex-panel p-3.5 flex items-center gap-3">
+  1010→            <span className={cn("w-2.5 h-2.5 rounded-full shrink-0", s.dot)} />
+  1011→            <div>
+  1012→              <p className="text-xl font-semibold leading-none">{loading ? "–" : s.value}</p>
+  1013→              <p className="text-[11px] text-muted-foreground mt-1">{s.label}</p>
+  1014→            </div>
+  1015→          </div>
+  1016→        ))}
+  1017→      </div>
+  1018→
+  1019→      {/* Filters */}
+  1020→      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+  1021→        <Input
+  1022→          value={searchDraft}
+  1023→          onChange={(e) => setSearchDraft(e.target.value)}
+  1024→          placeholder="Search projects…"
+  1025→          className="h-9 sm:max-w-xs"
+  1026→        />
+  1027→        <Select value={statusFilter} onValueChange={setStatusFilter}>
+  1028→          <SelectTrigger className="h-9 sm:w-44"><SelectValue placeholder="All statuses" /></SelectTrigger>
+  1029→          <SelectContent>
+  1030→            <SelectItem value="all">All statuses</SelectItem>
+  1031→            {PROJECT_STATUSES.map((s) => <SelectItem key={s} value={s}>{s.replace(/_/g, " ")}</SelectItem>)}
+  1032→          </SelectContent>
+  1033→        </Select>
+  1034→      </div>
+  1035→
+  1036→      {error ? (
+  1037→        <ErrorState message="Projects could not be loaded." onRetry={() => void load()} />
+  1038→      ) : loading ? (
+  1039→        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+  1040→          {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-48 w-full rounded-xl" />)}
+  1041→        </div>
+  1042→      ) : filtered.length === 0 ? (
+  1043→        <EmptyState
+  1044→          icon={<FolderKanban className="w-5 h-5" />}
+  1045→          title={projects.length === 0 ? "No projects yet" : "No projects match"}
+  1046→          description={projects.length === 0
+  1047→            ? canCreate
+  1048→              ? "Create your first project to start planning delivery phases and tasks."
+  1049→              : "Projects created by managers will appear here."
+  1050→            : "Try adjusting the search or status filter."}
+  1051→          action={
+  1052→            projects.length === 0 && canCreate ? (
+  1053→              <Button size="sm" onClick={() => setNewOpen(true)}><Plus className="w-4 h-4 mr-2" /> New Project</Button>
+  1054→            ) : undefined
+  1055→          }
+  1056→        />
+  1057→      ) : (
+  1058→        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+  1059→          {filtered.map((p) => {
+  1060→            const dl = deadlineMeta(p.deadline, p.status);
+  1061→            return (
+  1062→              <button
+  1063→                key={p.id}
+  1064→                onClick={() => { setDetailId(p.id); setDetailOpen(true); }}
+  1065→                className="apex-panel p-4 text-left space-y-3 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+  1066→              >
+  1067→                <div className="flex items-center justify-between gap-2">
+  1068→                  <span className="text-[11px] text-muted-foreground font-mono">{p.projectNumber}</span>
+  1069→                  <StatusBadge status={p.status} />
+  1070→                </div>
+  1071→                <div>
+  1072→                  <p className="font-semibold leading-snug line-clamp-1">{p.name}</p>
+  1073→                  <p className="text-xs text-muted-foreground mt-0.5 truncate">{p.client?.companyName}</p>
+  1074→                </div>
+  1075→                <div className="flex items-center gap-2.5 flex-wrap">
+  1076→                  <PriorityBadge priority={p.priority} />
+  1077→                  <HealthBadge health={p.health} />
+  1078→                  <span className="text-[10px] text-muted-foreground">{p.phasesCount} phases · {p.membersCount} members</span>
+  1079→                </div>
+  1080→                <div>
+  1081→                  <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+  1082→                    <span>{p.doneTasks}/{p.totalTasks} tasks done</span>
+  1083→                    <span className="font-medium">{p.progress}%</span>
+  1084→                  </div>
+  1085→                  <Progress value={p.progress} className="h-1.5" />
+  1086→                </div>
+  1087→                <div className="flex items-center justify-between gap-2 pt-2 border-t border-border/60">
+  1088→                  <div className="flex items-center gap-1.5 min-w-0">
+  1089→                    <UserAvatar name={p.manager?.name} color={p.manager?.avatarColor} />
+  1090→                    <span className="text-[11px] truncate text-muted-foreground">{p.manager?.name ?? "No manager"}</span>
+  1091→                  </div>
+  1092→                  <span className={cn("text-[11px] flex items-center gap-1 shrink-0", dl.cls)}>
+  1093→                    <CalendarClock className="w-3 h-3" /> {dl.text}
+  1094→                  </span>
+  1095→                </div>
+  1096→              </button>
+  1097→            );
+  1098→          })}
+  1099→        </div>
+  1100→      )}
+  1101→
+  1102→      <ProjectDetailSheet
+  1103→        projectId={detailId}
+  1104→        open={detailOpen}
+  1105→        onOpenChange={setDetailOpen}
+  1106→        onChanged={refresh}
+  1107→        navigate={navigate}
+  1108→      />
+  1109→      <NewProjectDialog open={newOpen} onOpenChange={setNewOpen} onCreated={refresh} navigate={navigate} />
+  1110→    </div>
+  1111→  );
+  1112→}
+  1113→

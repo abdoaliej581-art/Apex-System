@@ -1,0 +1,660 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+     4→import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, Field } from "@/components/shared";
+     5→import { api, qs, formatDate, relativeTime } from "@/lib/api-client";
+     6→import { useSession } from "next-auth/react";
+     7→import { useToast } from "@/hooks/use-toast";
+     8→import { Button } from "@/components/ui/button";
+     9→import { Input } from "@/components/ui/input";
+    10→import { Textarea } from "@/components/ui/textarea";
+    11→import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+    12→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+    13→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    14→import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+    15→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+    16→import {
+    17→  FileSignature, Plus, MoreHorizontal, Pencil, Trash2, Eye, Send, PenLine, PlayCircle,
+    18→  CheckCheck, XCircle, RefreshCw, ExternalLink,
+    19→} from "lucide-react";
+    20→import { cn } from "@/lib/utils";
+    21→
+    22→// ================= Types & helpers =================
+    23→
+    24→type Party = { id: string; companyName: string } | null | undefined;
+    25→
+    26→type ContractListRow = {
+    27→  id: string; contractNumber: string; title: string; status: string;
+    28→  startDate?: string | null; endDate?: string | null; signedDate?: string | null; createdAt: string;
+    29→  documentUrl?: string | null;
+    30→  client?: Party; project?: { id: string; name: string } | null;
+    31→  proposal?: { id: string; proposalNumber: string; title: string } | null;
+    32→};
+    33→
+    34→type ActivityRow = { id: string; type: string; title: string; description?: string | null; actorName: string; actorColor: string; createdAt: string };
+    35→
+    36→type ContractDetail = ContractListRow & {
+    37→  clientId?: string | null; projectId?: string | null; proposalId?: string | null;
+    38→  scope?: string | null; deliverables?: string | null; timeline?: string | null;
+    39→  paymentTerms?: string | null; revisionTerms?: string | null; maintenanceTerms?: string | null; notes?: string | null;
+    40→  client?: Party; project?: { id: string; name: string; projectNumber?: string } | null;
+    41→  proposal?: { id: string; proposalNumber: string; title: string } | null;
+    42→  activities: ActivityRow[];
+    43→};
+    44→
+    45→type Option = { id: string; label: string };
+    46→
+    47→function extractList(data: unknown): Record<string, unknown>[] {
+    48→  if (Array.isArray(data)) return data as Record<string, unknown>[];
+    49→  if (data && typeof data === "object") {
+    50→    const obj = data as Record<string, unknown>;
+    51→    for (const key of ["items", "leads", "clients", "projects", "team"]) {
+    52→      if (Array.isArray(obj[key])) return obj[key] as Record<string, unknown>[];
+    53→    }
+    54→  }
+    55→  return [];
+    56→}
+    57→
+    58→function toOptions(url: string, labelKey: string): Promise<Option[]> {
+    59→  return api.get<unknown>(url)
+    60→    .then((data) => extractList(data).map((x) => ({ id: String(x.id), label: String(x[labelKey] ?? x.name ?? x.companyName ?? "") })).filter((o) => o.label))
+    61→    .catch(() => []);
+    62→}
+    63→
+    64→function toDateInput(d: string | Date): string {
+    65→  const x = new Date(d);
+    66→  const p = (n: number) => String(n).padStart(2, "0");
+    67→  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+    68→}
+    69→
+    70→/** Allowed next statuses per current status (mirrors server transitions) */
+    71→const NEXT_STATUSES: Record<string, { to: string; label: string }[]> = {
+    72→  DRAFT: [
+    73→    { to: "SENT", label: "Send contract" },
+    74→    { to: "CANCELLED", label: "Cancel" },
+    75→  ],
+    76→  SENT: [
+    77→    { to: "SIGNED", label: "Mark signed" },
+    78→    { to: "CANCELLED", label: "Cancel" },
+    79→  ],
+    80→  SIGNED: [
+    81→    { to: "ACTIVE", label: "Activate" },
+    82→    { to: "CANCELLED", label: "Cancel" },
+    83→  ],
+    84→  ACTIVE: [
+    85→    { to: "COMPLETED", label: "Mark completed" },
+    86→    { to: "CANCELLED", label: "Cancel" },
+    87→  ],
+    88→  COMPLETED: [],
+    89→  CANCELLED: [],
+    90→};
+    91→
+    92→// ================= Detail sheet =================
+    93→
+    94→function DetailBlock({ label, children }: { label: string; children?: ReactNode }) {
+    95→  if (!children) return null;
+    96→  return (
+    97→    <div>
+    98→      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">{label}</p>
+    99→      <div className="text-sm whitespace-pre-wrap leading-relaxed">{children}</div>
+   100→    </div>
+   101→  );
+   102→}
+   103→
+   104→function ContractDetailSheet({ id, open, onOpenChange, onChanged, canEdit, canDelete, onDeleteRequest }: {
+   105→  id: string | null; open: boolean; onOpenChange: (o: boolean) => void; onChanged: () => void;
+   106→  canEdit: boolean; canDelete: boolean; onDeleteRequest: (row: ContractListRow) => void;
+   107→}) {
+   108→  const { toast } = useToast();
+   109→  const [detail, setDetail] = useState<ContractDetail | null>(null);
+   110→  const [loading, setLoading] = useState(false);
+   111→  const [acting, setActing] = useState(false);
+   112→
+   113→  const loadDetail = useCallback(async () => {
+   114→    if (!id) return;
+   115→    setLoading(true);
+   116→    try {
+   117→      setDetail(await api.get<ContractDetail>(`/api/contracts/${id}`));
+   118→    } catch (e) {
+   119→      toast({ title: "Could not load contract", description: e instanceof Error ? e.message : undefined });
+   120→    } finally {
+   121→      setLoading(false);
+   122→    }
+   123→  }, [id, toast]);
+   124→
+   125→  useEffect(() => {
+   126→    if (open && id) loadDetail();
+   127→    if (!open) setDetail(null);
+   128→  }, [open, id, loadDetail]);
+   129→
+   130→  const act = async (status: string, successTitle: string) => {
+   131→    if (!id) return;
+   132→    setActing(true);
+   133→    try {
+   134→      await api.patch(`/api/contracts/${id}`, { status });
+   135→      toast({ title: successTitle });
+   136→      await loadDetail();
+   137→      onChanged();
+   138→    } catch (e) {
+   139→      toast({ title: "Action failed", description: e instanceof Error ? e.message : undefined });
+   140→    } finally {
+   141→      setActing(false);
+   142→    }
+   143→  };
+   144→
+   145→  return (
+   146→    <Sheet open={open} onOpenChange={onOpenChange}>
+   147→      <SheetContent side="right" className="w-full sm:max-w-lg p-0 flex flex-col">
+   148→        {loading || !detail ? (
+   149→          <div className="p-6"><ListSkeleton rows={8} /></div>
+   150→        ) : (
+   151→          <>
+   152→            <SheetHeader className="p-5 pb-3 border-b border-border">
+   153→              <div className="flex items-start justify-between gap-3">
+   154→                <div className="min-w-0">
+   155→                  <SheetTitle className="flex items-center gap-2 text-base">
+   156→                    <FileSignature className="w-4 h-4 text-primary shrink-0" /> {detail.contractNumber}
+   157→                  </SheetTitle>
+   158→                  <SheetDescription className="mt-1 line-clamp-2">{detail.title}</SheetDescription>
+   159→                </div>
+   160→                <StatusBadge status={detail.status} />
+   161→              </div>
+   162→              {canEdit && (NEXT_STATUSES[detail.status]?.length ?? 0) > 0 && (
+   163→                <div className="flex flex-wrap gap-2 mt-3">
+   164→                  {NEXT_STATUSES[detail.status].map((s) => (
+   165→                    <Button
+   166→                      key={s.to}
+   167→                      size="sm"
+   168→                      variant={s.to === "CANCELLED" ? "outline" : "default"}
+   169→                      className={cn(s.to === "CANCELLED" && "text-rose-300 hover:text-rose-200", s.to === "SIGNED" && "bg-emerald-600 hover:bg-emerald-600/90 text-white")}
+   170→                      onClick={() => act(s.to, s.label)}
+   171→                      disabled={acting}
+   172→                    >
+   173→                      {s.to === "SENT" && <Send className="w-3.5 h-3.5 mr-1.5" />}
+   174→                      {s.to === "SIGNED" && <PenLine className="w-3.5 h-3.5 mr-1.5" />}
+   175→                      {s.to === "ACTIVE" && <PlayCircle className="w-3.5 h-3.5 mr-1.5" />}
+   176→                      {s.to === "COMPLETED" && <CheckCheck className="w-3.5 h-3.5 mr-1.5" />}
+   177→                      {s.to === "CANCELLED" && <XCircle className="w-3.5 h-3.5 mr-1.5" />}
+   178→                      {s.label}
+   179→                    </Button>
+   180→                  ))}
+   181→                </div>
+   182→              )}
+   183→            </SheetHeader>
+   184→
+   185→            <div className="flex-1 overflow-y-auto apex-scroll p-5 space-y-5">
+   186→              <div className="grid grid-cols-2 gap-3 text-sm">
+   187→                <div>
+   188→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Client</p>
+   189→                  <p className="font-medium">{detail.client?.companyName ?? "—"}</p>
+   190→                </div>
+   191→                <div>
+   192→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Project</p>
+   193→                  <p className="font-medium">{detail.project?.name ?? "Unlinked"}</p>
+   194→                </div>
+   195→                <div>
+   196→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Start</p>
+   197→                  <p className="font-medium">{formatDate(detail.startDate)}</p>
+   198→                </div>
+   199→                <div>
+   200→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">End</p>
+   201→                  <p className="font-medium">{formatDate(detail.endDate)}</p>
+   202→                </div>
+   203→                <div>
+   204→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Signed</p>
+   205→                  <p className="font-medium">{formatDate(detail.signedDate)}</p>
+   206→                </div>
+   207→                <div>
+   208→                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Proposal</p>
+   209→                  <p className="font-medium">{detail.proposal?.proposalNumber ?? "Unlinked"}</p>
+   210→                </div>
+   211→              </div>
+   212→
+   213→              {detail.documentUrl && (
+   214→                <a href={detail.documentUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline">
+   215→                  <ExternalLink className="w-3.5 h-3.5" /> Open contract document
+   216→                </a>
+   217→              )}
+   218→
+   219→              <DetailBlock label="Scope">{detail.scope}</DetailBlock>
+   220→              <DetailBlock label="Deliverables">{detail.deliverables}</DetailBlock>
+   221→              <DetailBlock label="Timeline">{detail.timeline}</DetailBlock>
+   222→              <DetailBlock label="Payment terms">{detail.paymentTerms}</DetailBlock>
+   223→              <DetailBlock label="Revision terms">{detail.revisionTerms}</DetailBlock>
+   224→              <DetailBlock label="Maintenance terms">{detail.maintenanceTerms}</DetailBlock>
+   225→              <DetailBlock label="Internal notes">{detail.notes}</DetailBlock>
+   226→
+   227→              {canDelete && detail.status === "DRAFT" && (
+   228→                <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => onDeleteRequest(detail)}>
+   229→                  <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Delete draft
+   230→                </Button>
+   231→              )}
+   232→
+   233→              <div>
+   234→                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">History</p>
+   235→                {detail.activities.length === 0 ? (
+   236→                  <p className="text-sm text-muted-foreground text-center py-6">No history recorded yet.</p>
+   237→                ) : (
+   238→                  <div className="space-y-4">
+   239→                    {detail.activities.map((a) => (
+   240→                      <div key={a.id} className="flex gap-3">
+   241→                        <div
+   242→                          className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 border"
+   243→                          style={{ backgroundColor: `${a.actorColor}22`, color: a.actorColor, borderColor: `${a.actorColor}55` }}
+   244→                        >
+   245→                          {a.actorName.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
+   246→                        </div>
+   247→                        <div className="min-w-0">
+   248→                          <p className="text-sm leading-snug">{a.title}</p>
+   249→                          {a.description && <p className="text-xs text-muted-foreground mt-0.5">{a.description}</p>}
+   250→                          <p className="text-[11px] text-muted-foreground mt-0.5">{a.actorName} · {relativeTime(a.createdAt)}</p>
+   251→                        </div>
+   252→                      </div>
+   253→                    ))}
+   254→                  </div>
+   255→                )}
+   256→              </div>
+   257→            </div>
+   258→          </>
+   259→        )}
+   260→      </SheetContent>
+   261→    </Sheet>
+   262→  );
+   263→}
+   264→
+   265→// ================= Main view =================
+   266→
+   267→export function ContractsView({ navigate }: { navigate: (p: string) => void }) {
+   268→  void navigate;
+   269→  const { toast } = useToast();
+   270→  const { data: session } = useSession();
+   271→  const perms = session?.user?.permissions || [];
+   272→  const canCreate = perms.includes("contracts.create");
+   273→  const canEdit = perms.includes("contracts.edit");
+   274→  const canDelete = perms.includes("contracts.delete");
+   275→
+   276→  const [rows, setRows] = useState<ContractListRow[]>([]);
+   277→  const [total, setTotal] = useState(0);
+   278→  const [page, setPage] = useState(1);
+   279→  const [pageSize] = useState(25);
+   280→  const [loading, setLoading] = useState(true);
+   281→  const [error, setError] = useState(false);
+   282→  const [statusFilter, setStatusFilter] = useState("ALL");
+   283→  const [search, setSearch] = useState("");
+   284→  const [query, setQuery] = useState("");
+   285→  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+   286→
+   287→  const [clientOpts, setClientOpts] = useState<Option[]>([]);
+   288→  const [projectOpts, setProjectOpts] = useState<Option[]>([]);
+   289→  const [proposalOpts, setProposalOpts] = useState<Option[]>([]);
+   290→
+   291→  const [dialogOpen, setDialogOpen] = useState(false);
+   292→  const [editingId, setEditingId] = useState<string | null>(null);
+   293→  const [saving, setSaving] = useState(false);
+   294→  const [form, setForm] = useState({
+   295→    title: "", clientId: "", projectId: "", proposalId: "",
+   296→    scope: "", deliverables: "", timeline: "", paymentTerms: "",
+   297→    revisionTerms: "", maintenanceTerms: "", startDate: "", endDate: "", notes: "",
+   298→  });
+   299→
+   300→  const [detailId, setDetailId] = useState<string | null>(null);
+   301→  const [sheetOpen, setSheetOpen] = useState(false);
+   302→  const [deleting, setDeleting] = useState<ContractListRow | null>(null);
+   303→
+   304→  const load = useCallback(async (opts?: { page?: number; status?: string; q?: string }) => {
+   305→    const p = opts?.page ?? page;
+   306→    const st = opts?.status ?? statusFilter;
+   307→    const q = opts?.q ?? query;
+   308→    setLoading(true);
+   309→    setError(false);
+   310→    try {
+   311→      const data = await api.get<{ items: ContractListRow[]; total: number }>(
+   312→        `/api/contracts${qs({ page: p, pageSize, status: st === "ALL" ? undefined : st, q: q || undefined })}`
+   313→      );
+   314→      setRows(data.items);
+   315→      setTotal(data.total);
+   316→      setPage(p);
+   317→    } catch (e) {
+   318→      setError(true);
+   319→      toast({ title: "Could not load contracts", description: e instanceof Error ? e.message : undefined });
+   320→    } finally {
+   321→      setLoading(false);
+   322→    }
+   323→  }, [page, statusFilter, query, pageSize, toast]);
+   324→
+   325→  useEffect(() => { load({ page: 1, status: statusFilter, q: query }); }, [statusFilter, query]);
+   326→
+   327→  useEffect(() => {
+   328→    Promise.all([
+   329→      toOptions("/api/clients?pageSize=100", "companyName"),
+   330→      toOptions("/api/projects?pageSize=100", "name"),
+   331→      toOptions("/api/proposals?pageSize=100&status=ACCEPTED", "title"),
+   332→    ]).then(([c, p, pr]) => { setClientOpts(c); setProjectOpts(p); setProposalOpts(pr); });
+   333→  }, []);
+   334→
+   335→  const onSearchInput = (v: string) => {
+   336→    setSearch(v);
+   337→    if (debounce.current) clearTimeout(debounce.current);
+   338→    debounce.current = setTimeout(() => setQuery(v), 300);
+   339→  };
+   340→
+   341→  const openCreate = () => {
+   342→    setEditingId(null);
+   343→    setForm({
+   344→      title: "", clientId: "", projectId: "", proposalId: "",
+   345→      scope: "", deliverables: "", timeline: "", paymentTerms: "",
+   346→      revisionTerms: "", maintenanceTerms: "", startDate: "", endDate: "", notes: "",
+   347→    });
+   348→    setDialogOpen(true);
+   349→  };
+   350→
+   351→  const openEdit = async (row: ContractListRow) => {
+   352→    try {
+   353→      const d = await api.get<ContractDetail>(`/api/contracts/${row.id}`);
+   354→      setEditingId(row.id);
+   355→      setForm({
+   356→        title: d.title, clientId: d.clientId ?? "", projectId: d.projectId ?? "", proposalId: d.proposalId ?? "",
+   357→        scope: d.scope ?? "", deliverables: d.deliverables ?? "", timeline: d.timeline ?? "",
+   358→        paymentTerms: d.paymentTerms ?? "", revisionTerms: d.revisionTerms ?? "", maintenanceTerms: d.maintenanceTerms ?? "",
+   359→        startDate: d.startDate ? toDateInput(d.startDate) : "", endDate: d.endDate ? toDateInput(d.endDate) : "",
+   360→        notes: d.notes ?? "",
+   361→      });
+   362→      setDialogOpen(true);
+   363→    } catch (e) {
+   364→      toast({ title: "Could not load contract", description: e instanceof Error ? e.message : undefined });
+   365→    }
+   366→  };
+   367→
+   368→  const submit = async () => {
+   369→    if (form.title.trim().length < 2) return toast({ title: "Title is required" });
+   370→    if (!form.clientId) return toast({ title: "Client is required" });
+   371→    setSaving(true);
+   372→    try {
+   373→      const payload = {
+   374→        title: form.title.trim(),
+   375→        clientId: form.clientId,
+   376→        projectId: form.projectId || null,
+   377→        proposalId: form.proposalId || null,
+   378→        scope: form.scope || null,
+   379→        deliverables: form.deliverables || null,
+   380→        timeline: form.timeline || null,
+   381→        paymentTerms: form.paymentTerms || null,
+   382→        revisionTerms: form.revisionTerms || null,
+   383→        maintenanceTerms: form.maintenanceTerms || null,
+   384→        startDate: form.startDate || null,
+   385→        endDate: form.endDate || null,
+   386→        notes: form.notes || null,
+   387→      };
+   388→      if (editingId) {
+   389→        await api.patch(`/api/contracts/${editingId}`, payload);
+   390→        toast({ title: "Contract updated" });
+   391→      } else {
+   392→        await api.post("/api/contracts", payload);
+   393→        toast({ title: "Contract created as draft" });
+   394→      }
+   395→      setDialogOpen(false);
+   396→      load();
+   397→    } catch (e) {
+   398→      toast({ title: "Save failed", description: e instanceof Error ? e.message : undefined });
+   399→    } finally {
+   400→      setSaving(false);
+   401→    }
+   402→  };
+   403→
+   404→  const changeStatus = async (row: ContractListRow, status: string) => {
+   405→    try {
+   406→      await api.patch(`/api/contracts/${row.id}`, { status });
+   407→      toast({ title: `Contract ${status.toLowerCase()}` });
+   408→      load();
+   409→    } catch (e) {
+   410→      toast({ title: "Status change failed", description: e instanceof Error ? e.message : undefined });
+   411→    }
+   412→  };
+   413→
+   414→  const confirmDelete = async () => {
+   415→    if (!deleting) return;
+   416→    try {
+   417→      await api.delete(`/api/contracts/${deleting.id}`);
+   418→      toast({ title: "Draft deleted" });
+   419→      setDeleting(null);
+   420→      if (detailId === deleting.id) setSheetOpen(false);
+   421→      load();
+   422→    } catch (e) {
+   423→      toast({ title: "Delete failed", description: e instanceof Error ? e.message : undefined });
+   424→    }
+   425→  };
+   426→
+   427→  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+   428→
+   429→  return (
+   430→    <div>
+   431→      <PageHeader
+   432→        title="Contracts"
+   433→        description="Signed agreements with scope, terms and a clean Draft → Signed → Active lifecycle."
+   434→        actions={canCreate && <Button onClick={openCreate}><Plus className="w-4 h-4 mr-2" /> New Contract</Button>}
+   435→      />
+   436→
+   437→      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+   438→        <Input placeholder="Search number or title…" value={search} onChange={(e) => onSearchInput(e.target.value)} className="sm:max-w-xs" />
+   439→        <Select value={statusFilter} onValueChange={setStatusFilter}>
+   440→          <SelectTrigger className="sm:w-44"><SelectValue /></SelectTrigger>
+   441→          <SelectContent>
+   442→            <SelectItem value="ALL">All statuses</SelectItem>
+   443→            <SelectItem value="DRAFT">Draft</SelectItem>
+   444→            <SelectItem value="SENT">Sent</SelectItem>
+   445→            <SelectItem value="SIGNED">Signed</SelectItem>
+   446→            <SelectItem value="ACTIVE">Active</SelectItem>
+   447→            <SelectItem value="COMPLETED">Completed</SelectItem>
+   448→            <SelectItem value="CANCELLED">Cancelled</SelectItem>
+   449→          </SelectContent>
+   450→        </Select>
+   451→      </div>
+   452→
+   453→      {loading ? (
+   454→        <ListSkeleton />
+   455→      ) : error ? (
+   456→        <ErrorState onRetry={() => load()} />
+   457→      ) : total === 0 ? (
+   458→        <EmptyState
+   459→          icon={<FileSignature className="w-5 h-5" />}
+   460→          title={query || statusFilter !== "ALL" ? "No contracts match your filters" : "No contracts yet"}
+   461→          description={query || statusFilter !== "ALL" ? "Try adjusting the search or status filter." : "Draft your first client agreement with scope and terms."}
+   462→          action={canCreate && !(query || statusFilter !== "ALL") ? <Button size="sm" onClick={openCreate}><Plus className="w-4 h-4 mr-2" /> New Contract</Button> : undefined}
+   463→        />
+   464→      ) : (
+   465→        <div className="apex-panel overflow-x-auto">
+   466→          <table className="w-full text-sm">
+   467→            <thead>
+   468→              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+   469→                <th className="px-4 py-3 font-medium">Contract #</th>
+   470→                <th className="px-4 py-3 font-medium">Title</th>
+   471→                <th className="px-4 py-3 font-medium hidden lg:table-cell">Client</th>
+   472→                <th className="px-4 py-3 font-medium hidden xl:table-cell">Project</th>
+   473→                <th className="px-4 py-3 font-medium hidden md:table-cell">Status</th>
+   474→                <th className="px-4 py-3 font-medium hidden xl:table-cell">Start</th>
+   475→                <th className="px-4 py-3 font-medium hidden xl:table-cell">End</th>
+   476→                <th className="px-4 py-3 font-medium hidden xl:table-cell">Signed</th>
+   477→                <th className="px-4 py-3 font-medium text-right">Actions</th>
+   478→              </tr>
+   479→            </thead>
+   480→            <tbody className="divide-y divide-border">
+   481→              {rows.map((r) => (
+   482→                <tr key={r.id} className="hover:bg-accent/40 transition-colors">
+   483→                  <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{r.contractNumber}</td>
+   484→                  <td className="px-4 py-3">
+   485→                    <button className="text-left font-medium hover:text-primary transition-colors" onClick={() => { setDetailId(r.id); setSheetOpen(true); }}>
+   486→                      {r.title}
+   487→                    </button>
+   488→                    <p className="text-[11px] text-muted-foreground mt-0.5 lg:hidden">{r.client?.companyName ?? "—"}</p>
+   489→                  </td>
+   490→                  <td className="px-4 py-3 hidden lg:table-cell text-muted-foreground">{r.client?.companyName ?? "—"}</td>
+   491→                  <td className="px-4 py-3 hidden xl:table-cell text-muted-foreground">{r.project?.name ?? "—"}</td>
+   492→                  <td className="px-4 py-3 hidden md:table-cell"><StatusBadge status={r.status} /></td>
+   493→                  <td className="px-4 py-3 hidden xl:table-cell text-muted-foreground whitespace-nowrap">{formatDate(r.startDate)}</td>
+   494→                  <td className="px-4 py-3 hidden xl:table-cell text-muted-foreground whitespace-nowrap">{formatDate(r.endDate)}</td>
+   495→                  <td className="px-4 py-3 hidden xl:table-cell text-muted-foreground whitespace-nowrap">{formatDate(r.signedDate)}</td>
+   496→                  <td className="px-4 py-3 text-right">
+   497→                    <div className="inline-flex items-center gap-1">
+   498→                      <Button variant="ghost" size="icon" className="h-8 w-8" title="View" onClick={() => { setDetailId(r.id); setSheetOpen(true); }}>
+   499→                        <Eye className="w-3.5 h-3.5" />
+   500→                      </Button>
+   501→                      {canEdit && (NEXT_STATUSES[r.status]?.length ?? 0) > 0 && (
+   502→                        <DropdownMenu>
+   503→                          <DropdownMenuTrigger asChild>
+   504→                            <Button variant="ghost" size="icon" className="h-8 w-8" title="Status actions">
+   505→                              <MoreHorizontal className="w-4 h-4" />
+   506→                            </Button>
+   507→                          </DropdownMenuTrigger>
+   508→                          <DropdownMenuContent align="end">
+   509→                            {NEXT_STATUSES[r.status].map((s, i) => (
+   510→                              <div key={s.to}>
+   511→                                {i > 0 && s.to === "CANCELLED" && <DropdownMenuSeparator />}
+   512→                                <DropdownMenuItem
+   513→                                  className={cn(s.to === "CANCELLED" && "text-destructive focus:text-destructive")}
+   514→                                  onClick={() => changeStatus(r, s.to)}
+   515→                                >
+   516→                                  {s.label}
+   517→                                </DropdownMenuItem>
+   518→                              </div>
+   519→                            ))}
+   520→                          </DropdownMenuContent>
+   521→                        </DropdownMenu>
+   522→                      )}
+   523→                      {canEdit && ["DRAFT", "SENT"].includes(r.status) && (
+   524→                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(r)}>
+   525→                          <Pencil className="w-3.5 h-3.5" />
+   526→                        </Button>
+   527→                      )}
+   528→                      {canDelete && r.status === "DRAFT" && (
+   529→                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" title="Delete draft" onClick={() => setDeleting(r)}>
+   530→                          <Trash2 className="w-3.5 h-3.5" />
+   531→                        </Button>
+   532→                      )}
+   533→                    </div>
+   534→                  </td>
+   535→                </tr>
+   536→              ))}
+   537→            </tbody>
+   538→          </table>
+   539→        </div>
+   540→      )}
+   541→
+   542→      {totalPages > 1 && (
+   543→        <div className="flex items-center justify-between text-sm mt-4">
+   544→          <p className="text-muted-foreground">Page {page} of {totalPages} · {total} contracts</p>
+   545→          <div className="flex gap-2">
+   546→            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => load({ page: page - 1 })}>Previous</Button>
+   547→            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => load({ page: page + 1 })}>Next</Button>
+   548→          </div>
+   549→        </div>
+   550→      )}
+   551→
+   552→      {/* Create / Edit dialog */}
+   553→      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+   554→        <DialogContent className="sm:max-w-2xl">
+   555→          <DialogHeader>
+   556→            <DialogTitle>{editingId ? "Edit contract" : "New contract"}</DialogTitle>
+   557→            <DialogDescription>Terms are locked once the contract is signed.</DialogDescription>
+   558→          </DialogHeader>
+   559→          <div className="max-h-[70vh] overflow-y-auto apex-scroll pr-1 space-y-4">
+   560→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   561→              <Field label="Title" required>
+   562→                <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. E-commerce Platform — Master Agreement" />
+   563→              </Field>
+   564→              <div className="grid grid-cols-2 gap-3">
+   565→                <Field label="Start date">
+   566→                  <Input type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
+   567→                </Field>
+   568→                <Field label="End date">
+   569→                  <Input type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
+   570→                </Field>
+   571→              </div>
+   572→            </div>
+   573→            {clientOpts.length > 0 ? (
+   574→              <Field label="Client" required>
+   575→                <Select value={form.clientId || "NONE"} onValueChange={(v) => setForm({ ...form, clientId: v === "NONE" ? "" : v })}>
+   576→                  <SelectTrigger><SelectValue placeholder="Select client" /></SelectTrigger>
+   577→                  <SelectContent className="max-h-60">
+   578→                    {clientOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   579→                  </SelectContent>
+   580→                </Select>
+   581→              </Field>
+   582→            ) : (
+   583→              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
+   584→                Client list is unavailable (clients.view permission required). Ask an admin to create contracts or grant you access.
+   585→              </div>
+   586→            )}
+   587→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   588→              {projectOpts.length > 0 && (
+   589→                <Field label="Linked project">
+   590→                  <Select value={form.projectId || "NONE"} onValueChange={(v) => setForm({ ...form, projectId: v === "NONE" ? "" : v })}>
+   591→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   592→                    <SelectContent className="max-h-60">
+   593→                      <SelectItem value="NONE">None</SelectItem>
+   594→                      {projectOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   595→                    </SelectContent>
+   596→                  </Select>
+   597→                </Field>
+   598→              )}
+   599→              {proposalOpts.length > 0 && (
+   600→                <Field label="Linked proposal" hint="Accepted proposals only">
+   601→                  <Select value={form.proposalId || "NONE"} onValueChange={(v) => setForm({ ...form, proposalId: v === "NONE" ? "" : v })}>
+   602→                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+   603→                    <SelectContent className="max-h-60">
+   604→                      <SelectItem value="NONE">None</SelectItem>
+   605→                      {proposalOpts.map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}
+   606→                    </SelectContent>
+   607→                  </Select>
+   608→                </Field>
+   609→              )}
+   610→            </div>
+   611→            <Field label="Scope"><Textarea rows={2} value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value })} placeholder="What the engagement covers" /></Field>
+   612→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+   613→              <Field label="Deliverables"><Textarea rows={2} value={form.deliverables} onChange={(e) => setForm({ ...form, deliverables: e.target.value })} placeholder="Tangible outputs" /></Field>
+   614→              <Field label="Timeline"><Textarea rows={2} value={form.timeline} onChange={(e) => setForm({ ...form, timeline: e.target.value })} placeholder="Milestones and duration" /></Field>
+   615→              <Field label="Payment terms"><Textarea rows={2} value={form.paymentTerms} onChange={(e) => setForm({ ...form, paymentTerms: e.target.value })} placeholder="e.g. 40% / 30% / 30%" /></Field>
+   616→              <Field label="Revision terms"><Textarea rows={2} value={form.revisionTerms} onChange={(e) => setForm({ ...form, revisionTerms: e.target.value })} placeholder="Included revision rounds" /></Field>
+   617→              <Field label="Maintenance terms"><Textarea rows={2} value={form.maintenanceTerms} onChange={(e) => setForm({ ...form, maintenanceTerms: e.target.value })} placeholder="Warranty and support period" /></Field>
+   618→              <Field label="Internal notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+   619→            </div>
+   620→          </div>
+   621→          <DialogFooter>
+   622→            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
+   623→            <Button onClick={submit} disabled={saving || clientOpts.length === 0}>
+   624→              {saving ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : null}
+   625→              {editingId ? "Save changes" : "Create contract"}
+   626→            </Button>
+   627→          </DialogFooter>
+   628→        </DialogContent>
+   629→      </Dialog>
+   630→
+   631→      {/* Detail sheet */}
+   632→      <ContractDetailSheet
+   633→        id={detailId}
+   634→        open={sheetOpen}
+   635→        onOpenChange={setSheetOpen}
+   636→        onChanged={() => load()}
+   637→        canEdit={canEdit}
+   638→        canDelete={canDelete}
+   639→        onDeleteRequest={(row) => setDeleting(row)}
+   640→      />
+   641→
+   642→      {/* Delete confirm */}
+   643→      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
+   644→        <AlertDialogContent>
+   645→          <AlertDialogHeader>
+   646→            <AlertDialogTitle>Delete this draft?</AlertDialogTitle>
+   647→            <AlertDialogDescription>
+   648→              {deleting ? `${deleting.contractNumber} — ${deleting.title}` : ""} will be permanently removed. Only drafts can be deleted.
+   649→            </AlertDialogDescription>
+   650→          </AlertDialogHeader>
+   651→          <AlertDialogFooter>
+   652→            <AlertDialogCancel>Keep draft</AlertDialogCancel>
+   653→            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={confirmDelete}>Delete</AlertDialogAction>
+   654→          </AlertDialogFooter>
+   655→        </AlertDialogContent>
+   656→      </AlertDialog>
+   657→    </div>
+   658→  );
+   659→}
+   660→
