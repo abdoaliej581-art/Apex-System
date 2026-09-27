@@ -118,7 +118,7 @@ const TEAM = [
 async function main() {
   console.log("🌱 Seeding APEX SYSTEM...");
 
-  // Roles
+  // Roles — always update permissions so code changes propagate on re-seed
   for (const role of DEFAULT_ROLES) {
     await db.role.upsert({
       where: { key: role.key },
@@ -126,7 +126,7 @@ async function main() {
       create: { key: role.key, label: role.label, description: role.description, permissions: JSON.stringify(role.permissions), isSystem: true },
     });
   }
-  console.log(`  ✔ ${DEFAULT_ROLES.length} roles`);
+  console.log(`  ✔ ${DEFAULT_ROLES.length} roles (permissions synced)`);
 
   // Team users.
   //
@@ -152,18 +152,28 @@ async function main() {
   for (const member of TEAM) {
     const role = await db.role.findUnique({ where: { key: member.role } });
     if (!role) throw new Error(`Role ${member.role} missing`);
-    await db.user.upsert({
-      where: { email: member.email },
-      update: {},
-      create: {
-        email: member.email,
-        name: member.name,
-        title: member.title,
-        passwordHash,
-        avatarColor: member.color,
-        roles: { connect: { id: role.id } },
-      },
-    });
+    const existing = await db.user.findUnique({ where: { email: member.email }, include: { roles: { select: { key: true } } } });
+    if (existing) {
+      // Ensure the user has the correct role even if it changed or was disconnected
+      const hasRole = existing.roles.some((r) => r.key === member.role);
+      if (!hasRole) {
+        await db.user.update({
+          where: { email: member.email },
+          data: { roles: { connect: { id: role.id } } },
+        });
+      }
+    } else {
+      await db.user.create({
+        data: {
+          email: member.email,
+          name: member.name,
+          title: member.title,
+          passwordHash,
+          avatarColor: member.color,
+          roles: { connect: { id: role.id } },
+        },
+      });
+    }
   }
   if (usingGenerated) {
     console.log("  → One-time passwords for the 4 accounts above (shown once, not stored in git):");

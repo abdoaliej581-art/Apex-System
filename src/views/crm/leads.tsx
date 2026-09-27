@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import {
   Plus, Search, X, ChevronLeft, ChevronRight, MoreHorizontal, Pencil,
-  ArrowRightLeft, Trash2, Users, ExternalLink, UserX,
+  ArrowRightLeft, Trash2, Users, ExternalLink, UserX, Upload,
+  FileUp, AlertTriangle, CheckCircle2, Download, Info,
 } from "lucide-react";
-import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, PriorityBadge } from "@/components/shared";
+import { PageHeader, EmptyState, ErrorState, ListSkeleton, StatusBadge, PriorityBadge, Field } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
@@ -19,6 +20,9 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Progress } from "@/components/ui/progress";
 import { api, qs, formatCurrency, formatDate, relativeTime } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -43,7 +47,7 @@ type Filters = {
 const EMPTY_FILTERS: Filters = { q: "", status: "", source: "", priority: "", assignedToId: "" };
 const PAGE_SIZE = 25;
 
-export function LeadsView({ navigate }: ViewProps) {
+export function LeadsView({ navigate, entityId }: ViewProps) {
   const { data: session } = useSession();
   const permissions = session?.user?.permissions ?? [];
   const { toast } = useToast();
@@ -66,6 +70,15 @@ export function LeadsView({ navigate }: ViewProps) {
   const [deleteLead, setDeleteLead] = useState<Lead | null>(null);
   const [lostTarget, setLostTarget] = useState<Lead | null>(null);
   const [moving, setMoving] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+
+  // Auto-open entity detail when navigated here from global search
+  useEffect(() => {
+    if (entityId) {
+      setDetailId(entityId);
+      setDetailOpen(true);
+    }
+  }, [entityId]);
 
   // Debounce the search query (300 ms)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -150,7 +163,12 @@ export function LeadsView({ navigate }: ViewProps) {
         description="Create, qualify and assign sales opportunities with full activity history."
         actions={
           permissions.includes("leads.create") ? (
-            <Button onClick={() => setFormOpen(true)}><Plus className="w-4 h-4 mr-2" /> New Lead</Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+                <Upload className="w-4 h-4 mr-2" /> Import CSV
+              </Button>
+              <Button onClick={() => setFormOpen(true)}><Plus className="w-4 h-4 mr-2" /> New Lead</Button>
+            </div>
           ) : undefined
         }
       />
@@ -421,6 +439,371 @@ export function LeadsView({ navigate }: ViewProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* CSV Import */}
+      {importOpen && (
+        <ImportLeadsDialog
+          open={importOpen}
+          onOpenChange={setImportOpen}
+          onImported={() => { setImportOpen(false); load(); }}
+        />
+      )}
     </div>
+  );
+}
+
+// ===================================================================
+// ImportLeadsDialog — CSV → preview table → bulk import
+// ===================================================================
+
+const CSV_COLUMNS = [
+  { key: "companyName", label: "Company Name", required: true },
+  { key: "contactName", label: "Contact Name", required: true },
+  { key: "phone", label: "Phone", required: true },
+  { key: "email", label: "Email", required: false },
+  { key: "industry", label: "Industry", required: false },
+  { key: "location", label: "Location", required: false },
+  { key: "source", label: "Source", required: false },
+  { key: "serviceInterest", label: "Service Interest", required: false },
+  { key: "estimatedBudget", label: "Budget", required: false },
+  { key: "priority", label: "Priority", required: false },
+  { key: "notes", label: "Notes", required: false },
+] as const;
+
+type CsvRow = Record<string, string>;
+type ParsedRow = {
+  companyName: string; contactName: string; phone: string;
+  email?: string; industry?: string; location?: string;
+  source?: string; serviceInterest?: string; estimatedBudget?: string;
+  priority?: string; notes?: string;
+  _rowIndex: number;
+  _errors: string[];
+};
+
+function parseCSV(text: string): CsvRow[] {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const header = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, "").toLowerCase().replace(/\s+/g, ""));
+  return lines.slice(1).map((line) => {
+    // Basic CSV parsing — handles quoted fields containing commas
+    const cols: string[] = [];
+    let cur = "", inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQuote = !inQuote; continue; }
+      if (ch === "," && !inQuote) { cols.push(cur); cur = ""; continue; }
+      cur += ch;
+    }
+    cols.push(cur);
+    const row: CsvRow = {};
+    header.forEach((h, i) => { row[h] = (cols[i] ?? "").trim(); });
+    return row;
+  });
+}
+
+// Map common header variants to our field names
+const HEADER_ALIASES: Record<string, string> = {
+  company: "companyName", "company name": "companyName", companyname: "companyName",
+  contact: "contactName", "contact name": "contactName", contactname: "contactName",
+  name: "contactName",
+  phone: "phone", mobile: "phone", tel: "phone", telephone: "phone",
+  email: "email",
+  industry: "industry",
+  location: "location", city: "location", country: "location",
+  source: "source",
+  service: "serviceInterest", "service interest": "serviceInterest", serviceinterest: "serviceInterest",
+  budget: "estimatedBudget", "estimated budget": "estimatedBudget", estimatedbudget: "estimatedBudget",
+  priority: "priority",
+  notes: "notes", note: "notes", comments: "notes",
+};
+
+function mapRow(raw: CsvRow): ParsedRow {
+  const mapped: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const canonical = HEADER_ALIASES[k] ?? k;
+    mapped[canonical] = v;
+  }
+  const errors: string[] = [];
+  if (!mapped.companyName?.trim()) errors.push("Company name is required");
+  else if (mapped.companyName.trim().length < 2) errors.push("Company name must be ≥ 2 chars");
+  if (!mapped.contactName?.trim()) errors.push("Contact name is required");
+  else if (mapped.contactName.trim().length < 2) errors.push("Contact name must be ≥ 2 chars");
+  if (!mapped.phone?.trim()) errors.push("Phone is required");
+  else if (mapped.phone.trim().length < 7) errors.push("Phone must be ≥ 7 chars");
+
+  return {
+    companyName: mapped.companyName ?? "",
+    contactName: mapped.contactName ?? "",
+    phone: mapped.phone ?? "",
+    email: mapped.email || undefined,
+    industry: mapped.industry || undefined,
+    location: mapped.location || undefined,
+    source: mapped.source || undefined,
+    serviceInterest: mapped.serviceInterest || undefined,
+    estimatedBudget: mapped.estimatedBudget || undefined,
+    priority: mapped.priority || undefined,
+    notes: mapped.notes || undefined,
+    _rowIndex: 0,
+    _errors: errors,
+  };
+}
+
+const TEMPLATE_CSV = `Company Name,Contact Name,Phone,Email,Industry,Location,Source,Service Interest,Budget,Priority,Notes
+Nile Digital Co.,Ahmed Hassan,+20 100 123 4567,ahmed@nile.eg,Technology,Cairo,INSTAGRAM,Website Redesign,50000,HIGH,Met at DevCon
+Cairo Retail Group,Sara Mohamed,+20 111 987 6543,sara@cairoretail.com,Retail,Cairo,REFERRAL,E-commerce Platform,80000,MEDIUM,
+`;
+
+function downloadTemplate() {
+  const blob = new Blob([TEMPLATE_CSV], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "apex-leads-import-template.csv"; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function ImportLeadsDialog({ open, onOpenChange, onImported }: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  onImported: () => void;
+}) {
+  const { toast } = useToast();
+  const [step, setStep] = useState<"upload" | "preview" | "result">("upload");
+  const [rows, setRows] = useState<ParsedRow[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
+  const [result, setResult] = useState<{ created: number; failed: number; total: number } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const processFile = (file: File) => {
+    setFileError(null);
+    if (!file.name.endsWith(".csv") && file.type !== "text/csv") {
+      setFileError("Please upload a .csv file.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setFileError("File is too large. Maximum 2 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      const rawRows = parseCSV(text);
+      if (rawRows.length === 0) { setFileError("No data rows found in the file. Check the CSV has a header row."); return; }
+      if (rawRows.length > 200) { setFileError("Maximum 200 rows per import. Please split the file."); return; }
+      const parsed = rawRows.map((r, i) => ({ ...mapRow(r), _rowIndex: i + 1 }));
+      setRows(parsed);
+      setStep("preview");
+    };
+    reader.onerror = () => setFileError("Failed to read the file.");
+    reader.readAsText(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  };
+
+  const doImport = async () => {
+    const validRows = rows.filter((r) => r._errors.length === 0);
+    if (validRows.length === 0) return;
+    setImporting(true);
+    setImportProgress(0);
+    try {
+      // Simulate progress (actual call is a single POST)
+      const progressTimer = setInterval(() => setImportProgress((p) => Math.min(p + 15, 85)), 120);
+      const res = await api.post<{ created: number; failed: number; total: number }>(
+        "/api/leads/import",
+        { rows: validRows.map(({ _rowIndex: _r, _errors: _e, ...rest }) => rest) }
+      );
+      clearInterval(progressTimer);
+      setImportProgress(100);
+      setResult(res);
+      setStep("result");
+      toast({ title: `${res.created} lead${res.created === 1 ? "" : "s"} imported successfully` });
+    } catch (e) {
+      toast({ title: e instanceof Error ? e.message : "Import failed", variant: "destructive" });
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const reset = () => { setStep("upload"); setRows([]); setFileError(null); setResult(null); setImportProgress(0); };
+
+  const validCount = rows.filter((r) => r._errors.length === 0).length;
+  const errorCount = rows.filter((r) => r._errors.length > 0).length;
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload className="w-4 h-4 text-primary" />
+            Import leads from CSV
+          </DialogTitle>
+        </DialogHeader>
+
+        {/* STEP 1 — Upload */}
+        {step === "upload" && (
+          <div className="space-y-4 py-1">
+            <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 flex gap-2.5">
+              <Info className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>Upload a CSV file with your leads. Required columns: <strong className="text-foreground">Company Name, Contact Name, Phone</strong>.</p>
+                <p>Optional: Email, Industry, Location, Source, Service Interest, Budget, Priority, Notes.</p>
+              </div>
+            </div>
+
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileRef.current?.click()}
+              className={cn(
+                "border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors",
+                dragging ? "border-primary bg-primary/10" : "border-border hover:border-primary/50 hover:bg-secondary/40"
+              )}
+            >
+              <FileUp className={cn("w-8 h-8 mx-auto mb-3", dragging ? "text-primary" : "text-muted-foreground")} />
+              <p className="font-medium">Drop your CSV file here</p>
+              <p className="text-sm text-muted-foreground mt-1">or click to browse — max 200 rows, 2 MB</p>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".csv,text/csv"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) processFile(f); e.target.value = ""; }}
+              />
+            </div>
+
+            {fileError && (
+              <div className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2.5">
+                <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
+                <p className="text-sm text-destructive">{fileError}</p>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-1">
+              <Button variant="ghost" size="sm" className="text-xs gap-1.5" onClick={downloadTemplate}>
+                <Download className="w-3.5 h-3.5" /> Download template
+              </Button>
+              <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 2 — Preview */}
+        {step === "preview" && (
+          <div className="flex flex-col min-h-0 gap-4">
+            {/* Summary bar */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-sm font-medium">{rows.length} row{rows.length === 1 ? "" : "s"} found</span>
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-medium">
+                {validCount} valid
+              </span>
+              {errorCount > 0 && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 font-medium">
+                  {errorCount} with errors (will be skipped)
+                </span>
+              )}
+            </div>
+
+            <ScrollArea className="flex-1 max-h-[340px] rounded-lg border border-border">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-secondary/40 sticky top-0">
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground w-8">#</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground">Company</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground hidden sm:table-cell">Contact</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground hidden sm:table-cell">Phone</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground hidden md:table-cell">Source</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground hidden md:table-cell">Priority</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row._rowIndex} className={cn("border-b border-border/60", row._errors.length > 0 && "bg-rose-500/5")}>
+                      <td className="px-3 py-2 text-muted-foreground">{row._rowIndex}</td>
+                      <td className="px-3 py-2 font-medium max-w-[140px] truncate">{row.companyName || <span className="text-rose-300 italic">missing</span>}</td>
+                      <td className="px-3 py-2 hidden sm:table-cell max-w-[120px] truncate">{row.contactName || <span className="text-rose-300 italic">missing</span>}</td>
+                      <td className="px-3 py-2 hidden sm:table-cell">{row.phone || <span className="text-rose-300 italic">missing</span>}</td>
+                      <td className="px-3 py-2 hidden md:table-cell text-muted-foreground">{row.source || "—"}</td>
+                      <td className="px-3 py-2 hidden md:table-cell text-muted-foreground">{row.priority || "MEDIUM"}</td>
+                      <td className="px-3 py-2">
+                        {row._errors.length === 0 ? (
+                          <span className="text-emerald-300 text-[10px] font-medium">✓ valid</span>
+                        ) : (
+                          <span className="text-rose-300 text-[10px]" title={row._errors.join(", ")}>⚠ {row._errors[0]}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </ScrollArea>
+
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <Button variant="ghost" size="sm" onClick={reset}>Choose another file</Button>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+                <Button
+                  disabled={validCount === 0 || importing}
+                  onClick={doImport}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 min-w-[140px]"
+                >
+                  {importing ? (
+                    <>
+                      <span className="w-4 h-4 mr-2 border-2 border-current border-t-transparent rounded-full animate-spin inline-block" />
+                      Importing…
+                    </>
+                  ) : (
+                    `Import ${validCount} lead${validCount === 1 ? "" : "s"}`
+                  )}
+                </Button>
+              </div>
+            </div>
+            {importing && <Progress value={importProgress} className="h-1.5" />}
+          </div>
+        )}
+
+        {/* STEP 3 — Result */}
+        {step === "result" && result && (
+          <div className="py-4 flex flex-col items-center gap-4 text-center">
+            <CheckCircle2 className="w-12 h-12 text-emerald-400" />
+            <div>
+              <p className="text-lg font-semibold">Import complete</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {result.created} lead{result.created === 1 ? "" : "s"} created
+                {result.failed > 0 && `, ${result.failed} skipped due to errors`}
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-3 w-full max-w-xs">
+              <div className="rounded-lg bg-secondary/50 border border-border p-3 text-center">
+                <p className="text-xl font-bold">{result.total}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Total rows</p>
+              </div>
+              <div className="rounded-lg bg-emerald-500/8 border border-emerald-500/25 p-3 text-center">
+                <p className="text-xl font-bold text-emerald-300">{result.created}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Created</p>
+              </div>
+              <div className="rounded-lg bg-rose-500/8 border border-rose-500/25 p-3 text-center">
+                <p className={cn("text-xl font-bold", result.failed > 0 ? "text-rose-300" : "text-muted-foreground/50")}>{result.failed}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Skipped</p>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-2">
+              <Button variant="outline" onClick={() => { reset(); onOpenChange(false); onImported(); }}>
+                View leads
+              </Button>
+              <Button variant="ghost" onClick={reset}>Import another file</Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

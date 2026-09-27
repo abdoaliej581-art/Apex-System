@@ -73,7 +73,7 @@ const emptyForm = {
   priority: "MEDIUM", description: "", assignedToId: "",
 };
 
-export function TicketsView({ navigate: _navigate }: { navigate: (p: string) => void }) {
+export function TicketsView({ navigate: _navigate, entityId }: { navigate: (p: string) => void; entityId?: string }) {
   const { data: session } = useSession();
   const { toast } = useToast();
   const perms = session?.user?.permissions || [];
@@ -109,6 +109,11 @@ export function TicketsView({ navigate: _navigate }: { navigate: (p: string) => 
   const [composer, setComposer] = useState("");
   const [internalNote, setInternalNote] = useState(false);
   const [sending, setSending] = useState(false);
+
+  // Auto-open entity from global search
+  useEffect(() => {
+    if (entityId) setDetailId(entityId);
+  }, [entityId]);
 
   const pageSize = 15;
 

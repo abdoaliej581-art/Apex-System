@@ -11,14 +11,18 @@ export async function GET(_req: NextRequest) {
     const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
     const in7Days = new Date(endOfDay.getTime() + 7 * 24 * 60 * 60 * 1000);
 
+    // Revenue trend: last 6 months (payments grouped by month)
+    const trendStart = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+
     const [
       paymentsThisMonth, outstandingAgg, newLeads, activeLeads,
       proposalsAwaiting, activeProjects, tasksDueToday, overdueTasks,
-      upcomingMeetings, openTickets, pipelineRaw, recentActivities,
+      upcomingMeetings, openTickets, pipelineRaw, recentActivitiesRaw,
       todayFollowUps, overdueFollowUps, recentClients, teamRaw,
       recentPayments, expensesThisMonthAgg, outstandingCount,
       publishedContentThisMonth, scheduledContent, activeCampaigns,
       urgentOpenTickets, unassignedOpenTickets, activePlans, recentTickets,
+      todayMeetings, trendPayments, overdueFollowUpList,
     ] = await Promise.all([
       db.payment.aggregate({ _sum: { amount: true }, where: { date: { gte: startOfMonth } } }),
       db.invoice.aggregate({ _sum: { total: true }, where: { status: { in: ["SENT", "PARTIALLY_PAID", "OVERDUE"] } } }),
@@ -29,17 +33,22 @@ export async function GET(_req: NextRequest) {
       db.task.count({ where: { dueDate: { gte: startOfDay, lt: endOfDay }, status: { notIn: ["DONE"] }, deletedAt: null } }),
       db.task.count({ where: { dueDate: { lt: startOfDay }, status: { notIn: ["DONE"] }, deletedAt: null } }),
       db.meeting.count({ where: { date: { gte: now, lte: in7Days }, status: "SCHEDULED" } }),
-      db.ticket.count({ where: { status: { in: ["OPEN", "IN_PROGRESS", "WAITING_CLIENT"] } } }),
+      db.ticket.count({ where: { status: { in: ["OPEN", "IN_PROGRESS", "WAITING_CLIENT"] }, deletedAt: null } }),
       db.lead.groupBy({
         by: ["status"],
         _count: { _all: true },
         _sum: { estimatedBudget: true },
         where: { deletedAt: null },
       }),
+      // Fetch activities with plain scalar fields only — do NOT use include:{actor:...}
+      // to avoid Prisma client mismatch if prisma generate has not been re-run.
       db.activity.findMany({
         orderBy: { createdAt: "desc" },
         take: 12,
-        include: { actor: { select: { name: true, avatarColor: true } } },
+        select: {
+          id: true, type: true, title: true, entityType: true, entityId: true,
+          actorId: true, actorName: true, createdAt: true,
+        },
       }),
       db.followUp.count({ where: { dueAt: { gte: startOfDay, lt: endOfDay }, status: "PENDING" } }),
       db.followUp.count({ where: { dueAt: { lt: startOfDay }, status: "PENDING" } }),
@@ -71,22 +80,77 @@ export async function GET(_req: NextRequest) {
         where: { deletedAt: null, status: { in: ["OPEN", "IN_PROGRESS", "WAITING_CLIENT"] } },
         orderBy: { updatedAt: "desc" },
         take: 4,
+        include: { client: { select: { companyName: true } } },
+      }),
+      // Today's meetings
+      db.meeting.findMany({
+        where: { date: { gte: startOfDay, lt: endOfDay }, status: { in: ["SCHEDULED", "COMPLETED"] } },
+        orderBy: { date: "asc" },
+        take: 5,
         include: {
-          client: { select: { companyName: true } },
+          lead: { select: { id: true, companyName: true } },
+          client: { select: { id: true, companyName: true } },
+        },
+      }),
+      // Revenue trend: last 6 months of payments
+      db.payment.findMany({
+        where: { date: { gte: trendStart } },
+        select: { amount: true, date: true },
+        orderBy: { date: "asc" },
+      }),
+      // Overdue follow-ups list (top 5)
+      db.followUp.findMany({
+        where: { dueAt: { lt: startOfDay }, status: "PENDING" },
+        orderBy: { dueAt: "asc" },
+        take: 5,
+        include: {
+          lead: { select: { id: true, companyName: true } },
+          client: { select: { id: true, companyName: true } },
         },
       }),
     ]);
+
+    // Resolve actor colors for recent activities
+    const actorIds = [...new Set(recentActivitiesRaw.map((a) => a.actorId).filter((id): id is string => !!id))];
+    const actorMap = new Map<string, { name: string; avatarColor: string }>();
+    if (actorIds.length > 0) {
+      const actors = await db.user.findMany({
+        where: { id: { in: actorIds } },
+        select: { id: true, name: true, avatarColor: true },
+      });
+      actors.forEach((u) => actorMap.set(u.id, { name: u.name, avatarColor: u.avatarColor }));
+    }
+
+    // Build revenue trend: bucket payments by month label (Jan '26, Feb '26, …)
+    const trendBuckets: Record<string, number> = {};
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = d.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+      trendBuckets[key] = 0;
+    }
+    for (const p of trendPayments) {
+      const d = new Date(p.date);
+      const key = d.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+      if (key in trendBuckets) trendBuckets[key] += p.amount;
+    }
+    const revenueTrend = Object.entries(trendBuckets).map(([month, amount]) => ({ month, amount }));
 
     const wonCount = pipelineRaw.find((p) => p.status === "WON")?._count._all ?? 0;
     const lostCount = pipelineRaw.find((p) => p.status === "LOST")?._count._all ?? 0;
     const closedCount = wonCount + lostCount;
 
-    const teamWorkload = teamRaw.map((u) => ({
-      id: u.id, name: u.name, title: u.title, avatarColor: u.avatarColor,
-      openTasks: u.assignedTasks.length,
-      urgent: u.assignedTasks.filter((t) => t.priority === "URGENT").length,
-      load: u.assignedTasks.length >= 8 ? "OVERLOADED" : u.assignedTasks.length >= 5 ? "BUSY" : u.assignedTasks.length >= 2 ? "NORMAL" : "AVAILABLE",
-    })).sort((a, b) => b.openTasks - a.openTasks);
+    const teamWorkload = teamRaw
+      .map((u) => ({
+        id: u.id, name: u.name, title: u.title, avatarColor: u.avatarColor,
+        openTasks: u.assignedTasks.length,
+        urgent: u.assignedTasks.filter((t) => t.priority === "URGENT").length,
+        load:
+          u.assignedTasks.length >= 8 ? "OVERLOADED"
+          : u.assignedTasks.length >= 5 ? "BUSY"
+          : u.assignedTasks.length >= 2 ? "NORMAL"
+          : "AVAILABLE",
+      }))
+      .sort((a, b) => b.openTasks - a.openTasks);
 
     return ok({
       stats: {
@@ -96,15 +160,34 @@ export async function GET(_req: NextRequest) {
         tasksDueToday, overdueTasks, upcomingMeetings, openTickets,
         todayFollowUps, overdueFollowUps,
       },
-      pipeline: pipelineRaw.map((p) => ({ status: p.status, count: p._count._all, value: p._sum.estimatedBudget ?? 0 })),
-      conversion: closedCount > 0 ? Math.round((wonCount / closedCount) * 100) : null,
-      activities: recentActivities.map((a) => ({
-        id: a.id, type: a.type, title: a.title, entityType: a.entityType, entityId: a.entityId,
-        actorName: a.actor?.name || a.actorName || "System", actorColor: a.actor?.avatarColor || "#22d3ee",
-        createdAt: a.createdAt,
+      pipeline: pipelineRaw.map((p) => ({
+        status: p.status,
+        count: p._count._all,
+        value: p._sum.estimatedBudget ?? 0,
       })),
+      conversion: closedCount > 0 ? Math.round((wonCount / closedCount) * 100) : null,
+      activities: recentActivitiesRaw.map((a) => {
+        const actor = a.actorId ? actorMap.get(a.actorId) : null;
+        return {
+          id: a.id, type: a.type, title: a.title, entityType: a.entityType, entityId: a.entityId,
+          actorName: actor?.name || a.actorName || "System",
+          actorColor: actor?.avatarColor || "#22d3ee",
+          createdAt: a.createdAt,
+        };
+      }),
       recentClients,
       teamWorkload,
+      revenueTrend,
+      todayMeetings: todayMeetings.map((m) => ({
+        id: m.id, title: m.title, startTime: m.startTime, endTime: m.endTime,
+        status: m.status, location: m.location ?? null, meetingLink: m.meetingLink ?? null,
+        entityName: m.client?.companyName ?? m.lead?.companyName ?? null,
+      })),
+      overdueFollowUpList: overdueFollowUpList.map((f) => ({
+        id: f.id, title: f.title, dueAt: f.dueAt,
+        entityName: f.client?.companyName ?? f.lead?.companyName ?? null,
+        priority: f.priority,
+      })),
       finance: {
         recentPayments: recentPayments.map((p) => ({
           id: p.id, amount: p.amount, date: p.date,

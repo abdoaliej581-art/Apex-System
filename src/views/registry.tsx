@@ -45,10 +45,15 @@ import { PortalTicketsView } from "@/views/portal/tickets";
 
 /**
  * Central SPA view registry (hash path → component).
- * Every module view receives `navigate` for cross-navigation.
+ * Every module view receives `navigate` for cross-navigation and optional
+ * `entityId` from global search to auto-open an entity detail.
  * IMPORTANT: do not add/remove view files without updating this registry.
  */
-export type ViewProps = { navigate: (path: string) => void };
+export type ViewProps = {
+  navigate: (path: string) => void;
+  /** Entity ID passed from global search — views may use it to auto-open a detail sheet. */
+  entityId?: string;
+};
 
 export const VIEW_REGISTRY: Record<string, ComponentType<ViewProps>> = {
   dashboard: DashboardView,

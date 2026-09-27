@@ -18,7 +18,7 @@ NAV_GROUPS.forEach((g) => g.items.forEach((i) => { REQUIRED_PERMISSIONS[i.key] =
 
 function AppContent() {
   const { data: session, status } = useSession();
-  const { path, navigate } = useHashRoute();
+  const { path, navigate, entityId } = useHashRoute();
 
   // Smart landing (§72): the hash router defaults to "dashboard". A CLIENT portal
   // account has no dashboard.view, so on login they would hit the NoAccess panel.
@@ -57,16 +57,17 @@ function AppContent() {
         <EmptyState
           icon={<ShieldOff className="w-5 h-5" />}
           title="You do not have access to this page"
-          description={`Your role does not include the “${required}” permission. If you believe this is a mistake, ask an administrator to update your role.`}
+          description={`Your role does not include the "${required}" permission. If you believe this is a mistake, ask an administrator to update your role.`}
           action={<Button variant="outline" onClick={() => navigate("dashboard")}>Back to Dashboard</Button>}
         />
       ) : View ? (
-        <View navigate={navigate} />
+        // Pass entityId from search so views can auto-open the detail drawer
+        <View navigate={navigate} entityId={entityId ?? undefined} />
       ) : (
         <EmptyState
           icon={<ShieldAlert className="w-5 h-5" />}
           title="Page not found"
-          description={`No view is registered for “${path}”.`}
+          description={`No view is registered for "${path}".`}
           action={<Button variant="outline" onClick={() => navigate("dashboard")}>Back to Dashboard</Button>}
         />
       )}

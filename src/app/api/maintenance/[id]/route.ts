@@ -55,13 +55,16 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       take: 50,
     });
 
-    const activities = await db.activity.findMany({
+    const activitiesRaw = await db.activity.findMany({
       where: { entityType: "MAINTENANCE", entityId: id },
       orderBy: { createdAt: "desc" },
       take: 30,
-      include: { actor: { select: { name: true, avatarColor: true } } },
+      select: {
+        id: true, title: true, description: true,
+        actorId: true, actorName: true, createdAt: true,
+      },
     });
-    const actorIds = [...new Set(activities.map((a) => a.actorId).filter((v): v is string => !!v))];
+    const actorIds = [...new Set(activitiesRaw.map((a) => a.actorId).filter((v): v is string => !!v))];
     const actors = actorIds.length
       ? await db.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, avatarColor: true } })
       : [];
@@ -73,7 +76,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
         id: l.id, hours: l.hours, note: l.note, spentOn: l.spentOn,
         createdAt: l.createdAt, loggedById: l.loggedById, loggedByName: l.loggedByName,
       })),
-      activities: activities.map((a) => ({
+      activities: activitiesRaw.map((a) => ({
         id: a.id, title: a.title, description: a.description, createdAt: a.createdAt,
         actorName: a.actorName, actorColor: a.actorId ? colorById.get(a.actorId) ?? null : null,
       })),

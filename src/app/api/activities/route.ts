@@ -25,22 +25,37 @@ export async function GET(req: NextRequest) {
         : {}),
     };
 
-    const [activities, total] = await Promise.all([
+    const [activitiesRaw, total] = await Promise.all([
       db.activity.findMany({
         where,
         orderBy: { createdAt: "desc" },
         take, skip,
-        include: { actor: { select: { name: true, avatarColor: true } } },
+        select: {
+          id: true, type: true, title: true, description: true,
+          entityType: true, entityId: true,
+          actorId: true, actorName: true, createdAt: true,
+        },
       }),
       db.activity.count({ where }),
     ]);
 
+    // Resolve actor avatarColors without the potentially-stale actor relation
+    const actorIds = [...new Set(activitiesRaw.map((a) => a.actorId).filter((id): id is string => !!id))];
+    const actorMap = new Map<string, string>();
+    if (actorIds.length > 0) {
+      const actors = await db.user.findMany({
+        where: { id: { in: actorIds } },
+        select: { id: true, avatarColor: true },
+      });
+      actors.forEach((u) => actorMap.set(u.id, u.avatarColor));
+    }
+
     return ok({
-      items: activities.map((a) => ({
+      items: activitiesRaw.map((a) => ({
         id: a.id, type: a.type, title: a.title, description: a.description,
         entityType: a.entityType, entityId: a.entityId,
-        actorName: a.actor?.name || a.actorName || "System",
-        actorColor: a.actor?.avatarColor || "#22d3ee",
+        actorName: a.actorName || "System",
+        actorColor: (a.actorId && actorMap.get(a.actorId)) || "#22d3ee",
         createdAt: a.createdAt,
       })),
       total, page, pageSize,

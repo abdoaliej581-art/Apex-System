@@ -43,16 +43,31 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     });
     if (!campaign) throw new ApiError(404, "NOT_FOUND", "This campaign no longer exists.");
 
-    const activities = await db.activity.findMany({
+    const activitiesRaw = await db.activity.findMany({
       where: { entityType: "CAMPAIGN", entityId: id },
       orderBy: { createdAt: "desc" },
       take: 30,
-      include: { actor: { select: { name: true, avatarColor: true } } },
+      select: {
+        id: true, type: true, title: true, description: true,
+        actorId: true, actorName: true, createdAt: true,
+      },
     });
+    const campaignActorIds = [...new Set(activitiesRaw.map((a) => a.actorId).filter((v): v is string => !!v))];
+    const campaignActors = campaignActorIds.length
+      ? await db.user.findMany({ where: { id: { in: campaignActorIds } }, select: { id: true, avatarColor: true } })
+      : [];
+    const campaignActorColors = new Map(campaignActors.map((u) => [u.id, u.avatarColor]));
 
     // Split contents out of the campaign object so the list/detail shapes stay consistent
     const { contents, ...campaignFields } = campaign;
-    return ok({ campaign: campaignFields, contents, activities });
+    return ok({
+      campaign: campaignFields, contents,
+      activities: activitiesRaw.map((a) => ({
+        id: a.id, type: a.type, title: a.title, description: a.description, createdAt: a.createdAt,
+        actorName: a.actorName || "System",
+        actorColor: (a.actorId && campaignActorColors.get(a.actorId)) || "#22d3ee",
+      })),
+    });
   } catch (e) {
     return handleError(e);
   }

@@ -41,6 +41,7 @@ export function PaymentsView({ navigate }: { navigate: (p: string) => void }) {
   const [rows, setRows] = useState<PaymentRow[]>([]);
   const [total, setTotal] = useState(0);
   const [summary, setSummary] = useState({ totalCollected: 0 });
+  const [thisMonthTotal, setThisMonthTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -57,12 +58,20 @@ export function PaymentsView({ navigate }: { navigate: (p: string) => void }) {
     setLoading(true);
     setError(false);
     try {
-      const data = await api.get<{ items: PaymentRow[]; total: number; summary: { totalCollected: number } }>(
-        `/api/payments${qs({ q, method: method === "ALL" ? undefined : method, from, to, page, pageSize })}`
-      );
+      const now = new Date();
+      const monthFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+      const [data, monthData] = await Promise.all([
+        api.get<{ items: PaymentRow[]; total: number; summary: { totalCollected: number } }>(
+          `/api/payments${qs({ q, method: method === "ALL" ? undefined : method, from, to, page, pageSize })}`
+        ),
+        api.get<{ items: PaymentRow[]; total: number; summary: { totalCollected: number } }>(
+          `/api/payments${qs({ from: monthFrom, pageSize: 1 })}`
+        ),
+      ]);
       setRows(data.items);
       setTotal(data.total);
       setSummary(data.summary);
+      setThisMonthTotal(monthData.summary.totalCollected);
     } catch {
       setError(true);
     } finally {
@@ -74,9 +83,6 @@ export function PaymentsView({ navigate }: { navigate: (p: string) => void }) {
   useEffect(() => { setPage(1); }, [q, method, from, to]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const thisMonth = rows
-    .filter((r) => new Date(r.date).getMonth() === new Date().getMonth() && new Date(r.date).getFullYear() === new Date().getFullYear())
-    .reduce((s, r) => s + r.amount, 0);
 
   return (
     <div>
@@ -97,7 +103,7 @@ export function PaymentsView({ navigate }: { navigate: (p: string) => void }) {
         </div>
         <div className="apex-panel p-4 flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-cyan-500/10 text-cyan-300 flex items-center justify-center"><Banknote className="w-4 h-4" /></div>
-          <div><p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Collected this month (page)</p><p className="text-lg font-semibold">{formatCurrency(thisMonth)}</p></div>
+          <div><p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Collected this month</p><p className="text-lg font-semibold">{formatCurrency(thisMonthTotal)}</p></div>
         </div>
       </div>
 

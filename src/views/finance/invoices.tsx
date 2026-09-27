@@ -19,7 +19,7 @@ import { Progress } from "@/components/ui/progress";
 import { relativeTime } from "@/lib/api-client";
 import {
   FileSpreadsheet, Plus, Trash2, Send, Ban, Wallet, AlertCircle,
-  Banknote, CircleDashed, X, Printer,
+  Banknote, CircleDashed, X, Printer, Mail, CheckCircle2, AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -48,7 +48,7 @@ const STATUS_OPTIONS = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
-export function InvoicesView({ navigate }: { navigate: (p: string) => void }) {
+export function InvoicesView({ navigate, entityId }: { navigate: (p: string) => void; entityId?: string }) {
   const { data: session } = useSession();
   const { toast } = useToast();
   const perms = session?.user?.permissions || [];
@@ -66,6 +66,11 @@ export function InvoicesView({ navigate }: { navigate: (p: string) => void }) {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+
+  // Auto-open entity from global search
+  useEffect(() => {
+    if (entityId) setDetailId(entityId);
+  }, [entityId]);
 
   const pageSize = 15;
 
@@ -369,6 +374,7 @@ function InvoiceDetailSheet({ invoiceId, onClose, can }: {
   const [loading, setLoading] = useState(true);
   const [payOpen, setPayOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"SENT" | "CANCELLED" | "DELETE" | null>(null);
+  const [emailOpen, setEmailOpen] = useState(false);
   const [org, setOrg] = useState<InvoicePrintOrg>({ name: "APEX" });
 
   useEffect(() => {
@@ -469,6 +475,11 @@ function InvoiceDetailSheet({ invoiceId, onClose, can }: {
               <Button size="sm" variant="outline" onClick={printCurrent}>
                 <Printer className="w-4 h-4 mr-1.5" /> Print / PDF
               </Button>
+              {can("invoices.edit") && inv.status !== "DRAFT" && inv.status !== "CANCELLED" && (
+                <Button size="sm" variant="outline" onClick={() => setEmailOpen(true)}>
+                  <Mail className="w-4 h-4 mr-1.5" /> Email to client
+                </Button>
+              )}
               {can("payments.create") && !["PAID", "CANCELLED", "DRAFT"].includes(inv.status) && inv.remaining > 0 && (
                 <Button size="sm" className="bg-emerald-500/90 hover:bg-emerald-500 text-emerald-950 font-semibold" onClick={() => setPayOpen(true)}>
                   <Wallet className="w-4 h-4 mr-1.5" /> Record payment
@@ -583,6 +594,12 @@ function InvoiceDetailSheet({ invoiceId, onClose, can }: {
                 onClose={() => { setPayOpen(false); load(); }}
               />
             )}
+            {emailOpen && inv && (
+              <EmailInvoiceDialog
+                invoice={{ id: inv.id, invoiceNumber: inv.invoiceNumber, clientName: inv.client?.companyName ?? "", clientEmail: null }}
+                onClose={() => setEmailOpen(false)}
+              />
+            )}
           </div>
         )}
       </SheetContent>
@@ -590,7 +607,112 @@ function InvoiceDetailSheet({ invoiceId, onClose, can }: {
   );
 }
 
-// ================= Record Payment Dialog =================
+// ================= Email Invoice Dialog =================
+function EmailInvoiceDialog({ invoice, onClose }: {
+  invoice: { id: string; invoiceNumber: string; clientName: string; clientEmail: string | null };
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [toEmail, setToEmail] = useState(invoice.clientEmail ?? "");
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const submit = async () => {
+    if (!toEmail.trim()) {
+      toast({ title: "Enter a recipient email address", variant: "destructive" });
+      return;
+    }
+    setSending(true);
+    try {
+      const res = await api.post<{ sent: boolean; skipped: boolean; sentTo: string }>(
+        `/api/invoices/${invoice.id}/email`,
+        { toEmail: toEmail.trim(), message: message.trim() || undefined }
+      );
+      if (res.skipped) {
+        toast({
+          title: "Email not sent — SMTP not configured",
+          description: "Set SMTP_HOST, SMTP_USER, SMTP_PASS and MAIL_FROM in your environment.",
+          variant: "destructive",
+        });
+      } else {
+        setSent(true);
+        toast({ title: `Invoice emailed to ${res.sentTo}` });
+      }
+    } catch (e) {
+      toast({ title: e instanceof Error ? e.message : "Failed to send email", variant: "destructive" });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Email invoice — {invoice.invoiceNumber}</DialogTitle>
+        </DialogHeader>
+        {sent ? (
+          <div className="py-6 flex flex-col items-center gap-3 text-center">
+            <CheckCircle2 className="w-10 h-10 text-emerald-400" />
+            <p className="font-medium">Invoice sent successfully</p>
+            <p className="text-sm text-muted-foreground">The client will receive the invoice with full details and payment terms.</p>
+            <Button variant="outline" className="mt-2" onClick={onClose}>Close</Button>
+          </div>
+        ) : (
+          <div className="space-y-3.5 py-1">
+            <p className="text-xs text-muted-foreground">
+              Sending <span className="text-foreground font-medium">{invoice.invoiceNumber}</span> to{" "}
+              <span className="text-foreground font-medium">{invoice.clientName}</span>
+            </p>
+            <Field label="Recipient email" required>
+              <Input
+                type="email"
+                value={toEmail}
+                onChange={(e) => setToEmail(e.target.value)}
+                placeholder="client@example.com"
+                className="h-9 bg-secondary/40"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                We pre-filled the primary contact email if available. You can override it.
+              </p>
+            </Field>
+            <Field label="Personal message (optional)" hint="Shown above the invoice details in the email.">
+              <Textarea
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                rows={3}
+                className="bg-secondary/40"
+                placeholder="e.g. Hi Ahmed, please find attached invoice for the Q4 project…"
+              />
+            </Field>
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/8 px-3 py-2.5 flex gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-200">
+                The email will contain the full invoice with all line items, totals, and payment terms.
+                Make sure the invoice is correct before sending.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
+              <Button
+                onClick={submit}
+                disabled={sending || !toEmail.trim()}
+                className="bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {sending ? (
+                  <><span className="w-4 h-4 mr-2 border-2 border-current border-t-transparent rounded-full animate-spin inline-block" />Sending…</>
+                ) : (
+                  <><Mail className="w-4 h-4 mr-1.5" />Send invoice</>
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
 export function RecordPaymentDialog({ invoice, onClose }: {
   invoice: { id: string; invoiceNumber: string; remaining: number; currency: string; clientName: string };
   onClose: () => void;

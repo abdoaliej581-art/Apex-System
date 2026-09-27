@@ -498,6 +498,7 @@ function RolesTab() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editRole, setEditRole] = useState<RoleDetail | null>(null);
   const [deleteRole, setDeleteRole] = useState<RoleDetail | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true); setError(false);
@@ -507,6 +508,19 @@ function RolesTab() {
     } catch { setError(true); } finally { setLoading(false); }
   }, []);
   useEffect(() => { load(); }, [load, reloadKey]);
+
+  const doSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await api.post<{ message: string }>("/api/roles/sync", {});
+      toast({ title: "Permissions synced", description: res.message });
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      toast({ title: e instanceof Error ? e.message : "Sync failed", variant: "destructive" });
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const doDelete = async () => {
     if (!deleteRole) return;
@@ -524,13 +538,19 @@ function RolesTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <p className="text-xs text-muted-foreground">
           Roles group permissions. Members inherit every permission of their roles.
         </p>
-        <Button onClick={() => setCreateOpen(true)} className="bg-primary text-primary-foreground hover:bg-primary/90">
-          <Plus className="w-4 h-4 mr-2" /> New role
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={doSync} disabled={syncing} title="Sync system role permissions from code to DB">
+            {syncing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 mr-1.5" />}
+            Sync permissions
+          </Button>
+          <Button onClick={() => setCreateOpen(true)} className="bg-primary text-primary-foreground hover:bg-primary/90">
+            <Plus className="w-4 h-4 mr-2" /> New role
+          </Button>
+        </div>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {roles.map((r) => (

@@ -939,7 +939,7 @@ function ProjectDetailSheet({
 
 // ============================= Projects View =============================
 
-export function ProjectsView({ navigate }: { navigate: (p: string) => void }) {
+export function ProjectsView({ navigate, entityId }: { navigate: (p: string) => void; entityId?: string }) {
   const { data: session } = useSession();
   const me = session?.user;
   const { toast } = useToast();
@@ -952,6 +952,14 @@ export function ProjectsView({ navigate }: { navigate: (p: string) => void }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [searchDraft, setSearchDraft] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+
+  // Auto-open entity detail when navigated here from global search
+  useEffect(() => {
+    if (entityId) {
+      setDetailId(entityId);
+      setDetailOpen(true);
+    }
+  }, [entityId]);
 
   const canCreate = !!me?.permissions?.includes("projects.create");
 

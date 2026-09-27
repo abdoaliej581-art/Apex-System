@@ -44,14 +44,29 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     const content = await db.content.findUnique({ where: { id }, include: contentInclude });
     if (!content) throw new ApiError(404, "NOT_FOUND", "This content no longer exists.");
 
-    const activities = await db.activity.findMany({
+    const activitiesRaw = await db.activity.findMany({
       where: { entityType: "CONTENT", entityId: id },
       orderBy: { createdAt: "desc" },
       take: 30,
-      include: { actor: { select: { name: true, avatarColor: true } } },
+      select: {
+        id: true, type: true, title: true, description: true,
+        actorId: true, actorName: true, createdAt: true,
+      },
     });
+    const contentActorIds = [...new Set(activitiesRaw.map((a) => a.actorId).filter((v): v is string => !!v))];
+    const contentActors = contentActorIds.length
+      ? await db.user.findMany({ where: { id: { in: contentActorIds } }, select: { id: true, avatarColor: true } })
+      : [];
+    const contentActorColors = new Map(contentActors.map((u) => [u.id, u.avatarColor]));
 
-    return ok({ content, activities });
+    return ok({
+      content,
+      activities: activitiesRaw.map((a) => ({
+        id: a.id, type: a.type, title: a.title, description: a.description, createdAt: a.createdAt,
+        actorName: a.actorName || "System",
+        actorColor: (a.actorId && contentActorColors.get(a.actorId)) || "#22d3ee",
+      })),
+    });
   } catch (e) {
     return handleError(e);
   }

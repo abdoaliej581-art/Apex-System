@@ -6,7 +6,9 @@ import { PageHeader, EmptyState, ErrorState } from "@/components/shared";
 import { UserAvatar } from "./tasks";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
-import { AlertTriangle, Clock, FolderKanban, ListTodo, Users } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { AlertTriangle, Clock, FolderKanban, ListTodo, Settings, UserPlus, Users } from "lucide-react";
+import { useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
 
 type TeamMember = {
@@ -40,6 +42,9 @@ const LOAD_BAR: Record<string, string> = {
 };
 
 export function TeamView({ navigate }: { navigate: (p: string) => void }) {
+  const { data: session } = useSession();
+  const perms = session?.user?.permissions || [];
+  const canManage = perms.includes("team.manage") || perms.includes("settings.manage");
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -75,6 +80,28 @@ export function TeamView({ navigate }: { navigate: (p: string) => void }) {
       <PageHeader
         title="Team"
         description="Who is doing what — workload balance, skills and availability across APEX."
+        actions={canManage ? (
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("settings")}
+              className="gap-2"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span className="hidden sm:inline">Invite member</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => navigate("settings")}
+              aria-label="Team settings"
+              className="h-9 w-9"
+            >
+              <Settings className="w-4 h-4" />
+            </Button>
+          </div>
+        ) : undefined}
       />
 
       {/* Header summary */}
@@ -113,6 +140,11 @@ export function TeamView({ navigate }: { navigate: (p: string) => void }) {
           icon={<Users className="w-5 h-5" />}
           title="No active members"
           description="Active team members will appear here with their live workload."
+          action={canManage ? (
+            <Button onClick={() => navigate("settings")}>
+              <UserPlus className="w-4 h-4 mr-2" /> Add first member
+            </Button>
+          ) : undefined}
         />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">

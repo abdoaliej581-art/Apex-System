@@ -76,7 +76,7 @@ const CLIENT_STATUSES = ["ACTIVE", "INACTIVE", "ARCHIVED"] as const;
 
 // ============ View ============
 
-export function ClientsView({ navigate }: ViewProps) {
+export function ClientsView({ navigate, entityId }: ViewProps) {
   const { data: session } = useSession();
   const permissions = session?.user?.permissions ?? [];
   const { toast } = useToast();
@@ -96,6 +96,11 @@ export function ClientsView({ navigate }: ViewProps) {
   const [detailRefresh, setDetailRefresh] = useState(0);
   const [formOpen, setFormOpen] = useState(false);
   const [editClient, setEditClient] = useState<ClientRow | null>(null);
+
+  // Auto-open entity from global search
+  useEffect(() => {
+    if (entityId) { setDetailId(entityId); setDetailOpen(true); }
+  }, [entityId]);
   const [archiveTarget, setArchiveTarget] = useState<ClientDetail | null>(null);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
